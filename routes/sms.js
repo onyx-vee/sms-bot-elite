@@ -3,7 +3,6 @@ const router = express.Router();
 
 const { sendHumanMessage } = require("../services/messaging");
 const { getDeals } = require("../services/deals");
-const { buildEliteResponse } = require("../services/closer");
 const { getSession } = require("../utils/memory");
 const {
   extractBudget,
@@ -28,9 +27,12 @@ function findMentionedDeal(msg, deals) {
 }
 
 router.post("/", async (req, res) => {
+  // 🔥 respond immediately (prevents webhook retries)
+  res.sendStatus(200);
+
   const from = req.body.number;
 
-  // 🧠 HANDLE MULTI-MESSAGE INPUT (CRITICAL FIX)
+  // 🧠 MULTI-MESSAGE FIX
   let raw = req.body.content || "";
 
   const parts = raw
@@ -45,33 +47,46 @@ router.post("/", async (req, res) => {
   const session = getSession(from);
 
   try {
-    // 🔥 RESET OVERRIDE (ALWAYS WINS)
+    // 🔥 RESET (always wins)
     if (/start over|reset|restart/.test(raw.toLowerCase())) {
       Object.keys(session).forEach(k => delete session[k]);
 
       await sendHumanMessage(from, "starting fresh, what are you looking at?");
-      return res.sendStatus(200);
+      return;
     }
 
     // 🔥 GREETING
     if (isGreeting(msg) && !session.started) {
       session.started = true;
 
-      await sendHumanMessage(from, "hey, what are you looking at right now?");
-      return res.sendStatus(200);
+      await sendHumanMessage(from, "hey, what are you looking to get into?");
+      return;
+    }
+
+    // 🧠 DETECT NEW SEARCH → reset context
+    if (/under|budget|monthly|deal|options/.test(msg)) {
+      delete session.activeDeal;
     }
 
     // 🧠 STORE FILTERS
     const budget = extractBudget(msg);
     const brand = detectBrand(msg);
 
-    if (budget) session.budget = budget;
-    if (brand) session.brand = brand;
+    if (budget) {
+      session.budget = budget;
+
+      // 🔥 force fresh results
+      delete session.lastDeals;
+      delete session.activeDeal;
+    }
+
+    if (brand) {
+      session.brand = brand;
+    }
 
     // 📊 GET DEALS
     const deals = await getDeals(session);
 
-    // 🧠 STORE DEALS
     if (deals.length) {
       session.lastDeals = deals;
     }
@@ -81,22 +96,44 @@ router.post("/", async (req, res) => {
 
     if (mentionedDeal) {
       session.activeDeal = mentionedDeal;
+
+      await sendHumanMessage(
+        from,
+        `got it, you're looking at the ${mentionedDeal.make} ${mentionedDeal.model}
+
+want me to break down numbers on that?`
+      );
+      return;
     }
 
-    // 🧠 HANDLE DUE AT SIGNING
-    if (/due|due at signing|down/.test(msg) && session.activeDeal) {
+    // 🧠 HANDLE DUE QUESTION
+    if (/due|due at signing|down/.test(msg)) {
+
+      if (!session.activeDeal) {
+        await sendHumanMessage(
+          from,
+          "which one are you looking at? i’ll break down the exact numbers for you"
+        );
+        return;
+      }
+
       await sendHumanMessage(
         from,
         `${session.activeDeal.make} ${session.activeDeal.model}
 
 due at signing is ${session.activeDeal.due}`
       );
-      return res.sendStatus(200);
+      return;
     }
 
     // 🧠 HANDLE ZERO DOWN
-    if (/0 down|zero down/.test(msg) && (session.activeDeal || deals.length)) {
-      const deal = session.activeDeal || deals[0];
+    if (/0 down|zero down/.test(msg)) {
+      const deal = session.activeDeal || session.lastDeals?.[0];
+
+      if (!deal) {
+        await sendHumanMessage(from, "what car are you looking at?");
+        return;
+      }
 
       const currentDown = Number(
         deal.due.toString().replace(/[^0-9]/g, "")
@@ -124,24 +161,37 @@ due at signing is ${session.activeDeal.due}`
 
 zero down puts you around $${newPayment}/mo (${deal.term} mo)`
       );
-      return res.sendStatus(200);
+      return;
     }
 
-    // 🧠 ELITE DEAL RESPONSE
+    // 🧠 DEAL SEARCH RESPONSE
     if (isShoppingIntent(msg) && deals.length) {
-      const reply = buildEliteResponse(deals, session);
 
-      await sendHumanMessage(from, reply);
-      return res.sendStatus(200);
+      const topDeals = deals.slice(0, 5);
+
+      const list = topDeals.map(d =>
+        `${d.make} ${d.model} - $${d.monthly}/mo`
+      ).join("\n");
+
+      await sendHumanMessage(
+        from,
+        `${list}
+
+there are ${deals.length} total options in that range
+
+want me to narrow it down or show you something specific?`
+      );
+
+      return;
     }
 
     // 🧠 SOFT CLOSE
-    if (/yes|yeah|that works|sounds good/.test(msg) && session.lastDeals?.length) {
+    if (/yes|yeah|that works|sounds good/.test(msg)) {
       await sendHumanMessage(
         from,
-        "perfect, i can lock this in for you\n\nwant me to send over the app?"
+        "perfect, i can line something up for you\n\nwant me to send over the app?"
       );
-      return res.sendStatus(200);
+      return;
     }
 
     // 🧠 HARD CLOSE
@@ -150,7 +200,7 @@ zero down puts you around $${newPayment}/mo (${deal.term} mo)`
         from,
         "here you go\n\nhttps://onyxautocollection.com/1745-2/"
       );
-      return res.sendStatus(200);
+      return;
     }
 
     // 🧠 FALLBACK
@@ -159,11 +209,8 @@ zero down puts you around $${newPayment}/mo (${deal.term} mo)`
       "got you, what kind of car are you thinking about?"
     );
 
-    return res.sendStatus(200);
-
   } catch (err) {
     console.error("❌ SMS ERROR:", err);
-    return res.sendStatus(200);
   }
 });
 
