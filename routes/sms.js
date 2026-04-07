@@ -9,7 +9,6 @@ const {
   extractBudget,
   detectBrand,
   isGreeting,
-  isReset,
   isShoppingIntent
 } = require("../utils/detectors");
 
@@ -29,14 +28,25 @@ function findMentionedDeal(msg, deals) {
 }
 
 router.post("/", async (req, res) => {
-  const msg = (req.body.content || "").toLowerCase();
   const from = req.body.number;
+
+  // 🧠 HANDLE MULTI-MESSAGE INPUT (CRITICAL FIX)
+  let raw = req.body.content || "";
+
+  const parts = raw
+    .split("\n")
+    .map(p => p.trim())
+    .filter(Boolean);
+
+  const msg = parts.length
+    ? parts[parts.length - 1].toLowerCase()
+    : "";
 
   const session = getSession(from);
 
   try {
-    // 🔥 RESET
-    if (isReset(msg)) {
+    // 🔥 RESET OVERRIDE (ALWAYS WINS)
+    if (/start over|reset|restart/.test(raw.toLowerCase())) {
       Object.keys(session).forEach(k => delete session[k]);
 
       await sendHumanMessage(from, "starting fresh, what are you looking at?");
@@ -66,7 +76,7 @@ router.post("/", async (req, res) => {
       session.lastDeals = deals;
     }
 
-    // 🧠 DETECT MENTIONED CAR
+    // 🧠 DETECT SPECIFIC CAR
     const mentionedDeal = findMentionedDeal(msg, session.lastDeals);
 
     if (mentionedDeal) {
@@ -153,7 +163,7 @@ zero down puts you around $${newPayment}/mo (${deal.term} mo)`
 
   } catch (err) {
     console.error("❌ SMS ERROR:", err);
-    return res.sendStatus(200); // prevent webhook retry loop
+    return res.sendStatus(200);
   }
 });
 
