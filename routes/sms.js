@@ -11,7 +11,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// 🧠 TIME CONTEXT
+// 🧠 TIME
 function getTimeContext() {
   const hour = new Date().getHours();
   if (hour < 12) return "morning";
@@ -19,7 +19,7 @@ function getTimeContext() {
   return "evening";
 }
 
-// 🧠 FORMAT DEAL (FORCES CLEAN LINES)
+// 🧠 FORMAT DEAL (FORCED CLEAN)
 function formatDeal(d) {
   return [
     `${d.make} ${d.model}`,
@@ -46,7 +46,7 @@ function findDeal(msg, deals) {
   );
 }
 
-// 🧠 BUDGET RANGE
+// 🧠 BUDGET
 function extractBudgetRange(msg) {
   const rangeMatch = msg.match(/(\d{3,4})\s?[-to]+\s?(\d{3,4})/);
 
@@ -69,12 +69,37 @@ function extractBudgetRange(msg) {
   return null;
 }
 
-// 🧠 VEHICLE TYPE
+// 🧠 TYPE DETECTION
 function detectType(msg) {
   if (/suv|crossover/.test(msg)) return "suv";
   if (/truck|pickup/.test(msg)) return "truck";
   if (/sedan|car/.test(msg)) return "sedan";
   return null;
+}
+
+// ✅ REAL SUV CLASSIFIER (FIXED)
+function isSUV(d) {
+  const str = `${d.make} ${d.model}`.toLowerCase();
+
+  const suvKeywords = [
+    "cx", "rav4", "crv", "pilot", "tiguan",
+    "x1", "x3", "x5", "x7",
+    "glc", "gle", "rx", "nx", "qx",
+    "ux", "mdx", "rdx", "highlander",
+    "explorer", "escape", "blazer", "equinox"
+  ];
+
+  return suvKeywords.some(k => str.includes(k));
+}
+
+// ✅ TRUCK CLASSIFIER
+function isTruck(d) {
+  const str = `${d.make} ${d.model}`.toLowerCase();
+
+  return [
+    "tacoma", "tundra", "frontier",
+    "silverado", "ram", "f150"
+  ].some(k => str.includes(k));
 }
 
 // 🧠 MEMORY
@@ -88,41 +113,29 @@ function updateConversationMemory(session, userMsg, botMsg) {
   }
 }
 
-// 🧠 AI RESPONSE (CONTROLLED)
+// 🧠 AI (CONTROLLED)
 async function aiReply({ message, deal, context, history }) {
+
   const convoHistory = history?.length
     ? history.map(h => `User: ${h.user}\nAssistant: ${h.bot}`).join("\n\n")
-    : "None";
-
-  const dealContext = deal
-    ? `Deal: ${deal.make} ${deal.model} at $${deal.monthly}/mo`
     : "";
 
   const prompt = `
-You are a high-end car broker texting a client.
+You are a high-end car broker texting.
 
-IMPORTANT:
+Rules:
+- no emojis
+- no fluff
+- 1–2 lines max
 - NEVER say "You:" or "Assistant:"
-- NEVER narrate
-- ONLY reply as a text message
+- do NOT repeat deals
+- guide conversation naturally
 
-Tone:
-- confident
-- smooth
-- short (1–2 lines max)
-
-Conversation:
 ${convoHistory}
 
-${dealContext}
+Context: ${context}
 
-Context:
-${context}
-
-Customer:
-${message}
-
-Respond naturally like a real broker.
+User: ${message}
 `;
 
   const response = await openai.chat.completions.create({
@@ -137,27 +150,26 @@ router.post("/", async (req, res) => {
   res.sendStatus(200);
 
   const from = req.body.number;
-  const raw = req.body.content || "";
-  const msg = raw.split("\n").pop().trim().toLowerCase();
+  const msg = (req.body.content || "").toLowerCase().trim();
 
   const session = getSession(from);
 
   try {
+
     // 🔥 RESET
     if (/start over|reset/.test(msg)) {
       Object.keys(session).forEach(k => delete session[k]);
 
-      const reply = "let’s reset — what are you thinking about?";
-      await sendHumanMessage(from, reply);
+      await sendHumanMessage(from, "let’s reset what are you thinking about?");
       return;
     }
 
-    // 🔥 GREETING (AI)
+    // 🔥 GREETING
     if (/^hi|hello|hey$/.test(msg)) {
 
       const ai = await aiReply({
         message: msg,
-        context: `Time: ${getTimeContext()}, returning: ${session.started ? "yes" : "no"}`,
+        context: `time: ${getTimeContext()}, returning: ${session.started ? "yes" : "no"}`,
         history: session.history
       });
 
@@ -179,48 +191,39 @@ router.post("/", async (req, res) => {
     const type = detectType(msg);
     if (type) session.type = type;
 
-    // 🧠 GET DEALS
+    // 🧠 DEALS
     const deals = await getDeals(session);
-    if (deals.length) session.lastDeals = deals;
+    session.lastDeals = deals;
 
     let filtered = deals;
 
-    // budget filter
     if (session.maxBudget) {
       filtered = filtered.filter(d =>
-        d.monthly >= (session.minBudget || 0) &&
         d.monthly <= session.maxBudget
       );
     }
 
-    // 🚨 TYPE FILTER
+    // ✅ TYPE FILTER FIXED
     if (session.type === "suv") {
-      filtered = filtered.filter(d =>
-        /cx|rav4|crv|pilot|tiguan|x|glc|rx|qx|ux/i.test(d.model)
-      );
+      filtered = filtered.filter(isSUV);
     }
 
     if (session.type === "truck") {
-      filtered = filtered.filter(d =>
-        /tacoma|tundra|frontier|silverado|ram|f150/i.test(d.model)
-      );
+      filtered = filtered.filter(isTruck);
     }
 
-    // 🧠 BMW HANDLER
+    // 🧠 BMW FILTER
     if (/bmw/.test(msg)) {
-
-      let brandDeals = deals.filter(d =>
+      let bmwDeals = deals.filter(d =>
         d.make.toLowerCase().includes("bmw")
       );
 
       if (/suv/.test(msg)) {
-        brandDeals = brandDeals.filter(d =>
-          /x1|x3|x5|x7/i.test(d.model)
-        );
+        bmwDeals = bmwDeals.filter(isSUV);
       }
 
-      const best = pickBest(brandDeals);
-      const list = best.map(formatDeal).join("\n\n");
+      const best = pickBest(bmwDeals);
+      const list = best.map(formatDeal).join("\n\n\n");
 
       await sendHumanMessage(from, list);
       return;
@@ -228,64 +231,26 @@ router.post("/", async (req, res) => {
 
     // 🧠 CONTINUATION
     if (/anything else|more|other/.test(msg)) {
-      const moreDeals = session.lastDeals?.slice(2, 5) || [];
-
-      const list = moreDeals.map(formatDeal).join("\n\n");
+      const more = filtered.slice(2, 5);
+      const list = more.map(formatDeal).join("\n\n\n");
 
       await sendHumanMessage(from, list);
       return;
     }
 
-    // 🧠 INFO / SPECS
-    if (/tell me more|spec|details|features/.test(msg)) {
-
-      const deal = findDeal(msg, session.lastDeals) || session.activeDeal;
-
-      const ai = await aiReply({
-        message: msg,
-        deal,
-        context: "Explain vehicle and guide decision",
-        history: session.history
-      });
-
-      await sendHumanMessage(from, ai);
-      updateConversationMemory(session, msg, ai);
-      return;
-    }
-
-    // 🧠 SELECT DEAL
-    const selected = findDeal(msg, session.lastDeals);
-
-    if (selected) {
-      session.activeDeal = selected;
-      session.lastCar = `${selected.make} ${selected.model}`;
-
-      const ai = await aiReply({
-        message: msg,
-        deal: selected,
-        context: "User focusing on this car",
-        history: session.history
-      });
-
-      await sendHumanMessage(from, ai);
-      updateConversationMemory(session, msg, ai);
-      return;
-    }
-
     // 🧠 DEAL SEARCH
-    if (range || /deal|options|suv|truck|budget/.test(msg)) {
+    if (/deal|options|suv|truck|budget/.test(msg) || range) {
 
       const best = pickBest(filtered);
-      const list = best.map(formatDeal).join("\n\n");
+      const list = best.map(formatDeal).join("\n\n\n");
 
       const ai = await aiReply({
         message: msg,
-        deal: best[0],
-        context: "Recommend best option briefly",
+        context: "recommend best option",
         history: session.history
       });
 
-      const reply = `${list}\n\n${ai}`;
+      const reply = list + "\n\n" + ai;
 
       await sendHumanMessage(from, reply);
       updateConversationMemory(session, msg, reply);
@@ -295,7 +260,7 @@ router.post("/", async (req, res) => {
     // 🧠 DEFAULT
     const ai = await aiReply({
       message: msg,
-      context: "User unclear",
+      context: "general response",
       history: session.history
     });
 
