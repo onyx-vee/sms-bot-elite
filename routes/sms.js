@@ -11,70 +11,42 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// 🧠 FORMAT DEAL
-function formatDeal(d) {
-  return [
-    `${d.make} ${d.model}`,
-    `$${d.monthly}/mo`,
-    `${d.term} mo / ${d.miles}`,
-    `${d.due} due`
-  ].join("\n");
+// 🧠 FORMAT DEALS FOR AI
+function formatDealsForAI(deals) {
+  return deals.map(d => {
+    return `${d.make} ${d.model} | $${d.monthly}/mo | ${d.term} mo | ${d.miles} miles | ${d.due} due`;
+  }).join("\n");
 }
 
-// 🧠 PICK BEST
-function pickBest(deals) {
-  return [...deals].sort((a, b) => a.monthly - b.monthly).slice(0, 2);
-}
-
-// 🧠 FIND DEAL (STRONG MATCH)
-function findDeal(msg, deals) {
-  msg = msg.toLowerCase();
-
-  return deals.find(d => {
-    const full = `${d.make} ${d.model}`.toLowerCase();
-    return msg.includes(d.model.toLowerCase()) || msg.includes(full);
-  });
-}
-
-// 🧠 TYPE
-function detectType(msg) {
-  if (/suv|crossover/.test(msg)) return "suv";
-  if (/truck|pickup/.test(msg)) return "truck";
-  return null;
-}
-
-// 🧠 SUV FILTER
-function isSUV(d) {
-  const str = `${d.make} ${d.model}`.toLowerCase();
-
-  return [
-    "cx","rav4","crv","pilot","tiguan",
-    "x1","x3","x5","x7",
-    "glc","gle","rx","nx","qx","ux",
-    "mdx","rdx","highlander","explorer"
-  ].some(k => str.includes(k));
-}
-
-// 🧠 TRUCK FILTER
-function isTruck(d) {
-  const str = `${d.make} ${d.model}`.toLowerCase();
-
-  return [
-    "tacoma","tundra","frontier",
-    "silverado","ram","f150"
-  ].some(k => str.includes(k));
-}
-
-// 🧠 BUDGET
+// 🧠 EXTRACT BUDGET RANGE
 function extractBudget(msg) {
-  const match = msg.match(/\d{3,4}/);
-  return match ? Number(match[0]) : null;
+  const nums = msg.match(/\d{3,4}/g);
+
+  if (!nums) return null;
+
+  if (nums.length >= 2) {
+    return {
+      min: Number(nums[0]),
+      max: Number(nums[1])
+    };
+  }
+
+  return {
+    min: 0,
+    max: Number(nums[0])
+  };
+}
+
+// 🧠 TYPE DETECTION
+function detectType(msg) {
+  if (/suv/.test(msg)) return "suv";
+  if (/truck/.test(msg)) return "truck";
+  return null;
 }
 
 // 🧠 MEMORY
 function updateMemory(session, user, bot) {
   if (!session.history) session.history = [];
-
   session.history.push({ user, bot });
 
   if (session.history.length > 3) {
@@ -82,25 +54,41 @@ function updateMemory(session, user, bot) {
   }
 }
 
-// 🧠 AI
-async function aiReply(message, context, history) {
-  const convo = history?.map(h => `User: ${h.user}\nBot: ${h.bot}`).join("\n\n") || "";
+// 🧠 AI RESPONSE (MASTER)
+async function aiReply({ message, deals, context, history }) {
+
+  const convo = history?.map(h =>
+    `User: ${h.user}\nBroker: ${h.bot}`
+  ).join("\n\n") || "";
+
+  const dealData = deals.length
+    ? formatDealsForAI(deals)
+    : "NO DEALS FOUND";
 
   const prompt = `
-You are a high-end car broker texting.
+You are a high-end car broker texting a client.
 
-Rules:
-- 1-2 lines max
-- no emojis
-- no fluff
-- no repeating
-- guide the deal forward
+IMPORTANT RULES:
+- ONLY use the deals provided below
+- NEVER make up pricing or cars
+- If no deals match, say you'll follow up with options
+- Keep responses clean and natural
+- Format deals clearly line by line
+- 2-4 lines max
 
+Conversation:
 ${convo}
 
-Context: ${context}
+Deals:
+${dealData}
 
-User: ${message}
+Context:
+${context}
+
+User:
+${message}
+
+Respond like a real broker texting.
 `;
 
   const res = await openai.chat.completions.create({
@@ -124,89 +112,54 @@ router.post("/", async (req, res) => {
     // 🔥 RESET
     if (/start over|reset/.test(msg)) {
       Object.keys(session).forEach(k => delete session[k]);
+
       await sendHumanMessage(from, "starting fresh — what are you looking for?");
       return;
     }
 
-    // 🔥 GREETING
-    if (/^hi|hello|hey$/.test(msg)) {
-      const ai = await aiReply(msg, "greet naturally", session.history);
-      await sendHumanMessage(from, ai);
-      updateMemory(session, msg, ai);
-      return;
-    }
-
-    // 🧠 GET DEALS
-    const deals = await getDeals(session);
-    session.lastDeals = deals;
-
-    // 🧠 PRIORITY 1: EXACT CAR MATCH
-    const selected = findDeal(msg, deals);
-
-    if (selected) {
-      session.activeDeal = selected;
-
-      const reply = formatDeal(selected);
-      await sendHumanMessage(from, reply);
-      updateMemory(session, msg, reply);
-      return;
-    }
-
-    // 🧠 PRIORITY 2: FOLLOW-UP ON ACTIVE DEAL
-    if (/tell me more|details|spec|features|engine|hp|that one/.test(msg)) {
-
-      if (session.activeDeal) {
-        const ai = await aiReply(msg, "explain this car and guide deal", session.history);
-
-        await sendHumanMessage(from, ai);
-        updateMemory(session, msg, ai);
-        return;
-      }
-    }
-
-    // 🧠 TYPE + BUDGET
-    const type = detectType(msg);
-    if (type) session.type = type;
-
+    // 🧠 EXTRACT INTENT
     const budget = extractBudget(msg);
-    if (budget) session.maxBudget = budget;
+    const type = detectType(msg);
 
-    let filtered = deals;
+    if (budget) {
+      session.min = budget.min;
+      session.max = budget.max;
+    }
 
-    if (session.maxBudget) {
-      filtered = filtered.filter(d => d.monthly <= session.maxBudget);
+    if (type) {
+      session.type = type;
+    }
+
+    // 🧠 GET DEALS FROM SHEET
+    let deals = await getDeals();
+
+    // 🧠 FILTER
+    if (session.max) {
+      deals = deals.filter(d => d.monthly <= session.max);
     }
 
     if (session.type === "suv") {
-      filtered = filtered.filter(isSUV);
+      deals = deals.filter(d =>
+        /cx|rav4|crv|x|glc|gle|rx|qx/i.test(`${d.make} ${d.model}`)
+      );
     }
 
     if (session.type === "truck") {
-      filtered = filtered.filter(isTruck);
+      deals = deals.filter(d =>
+        /tacoma|tundra|f150|ram|silverado/i.test(d.model)
+      );
     }
 
-    // 🧠 PRIORITY 3: DEAL SEARCH
-    if (/suv|truck|deal|options|budget|under/.test(msg) || budget) {
+    // 🧠 LIMIT (important for AI quality)
+    const topDeals = deals.slice(0, 5);
 
-      if (!filtered.length) {
-        await sendHumanMessage(from, "nothing strong there — want me to open it up?");
-        return;
-      }
-
-      const best = pickBest(filtered);
-      const list = best.map(formatDeal).join("\n\n\n");
-
-      const ai = await aiReply(msg, "recommend best option", session.history);
-
-      const reply = list + "\n\n" + ai;
-
-      await sendHumanMessage(from, reply);
-      updateMemory(session, msg, reply);
-      return;
-    }
-
-    // 🧠 DEFAULT
-    const ai = await aiReply(msg, "continue conversation", session.history);
+    // 🧠 AI RESPONSE (ALWAYS)
+    const ai = await aiReply({
+      message: msg,
+      deals: topDeals,
+      context: "User shopping for lease",
+      history: session.history
+    });
 
     await sendHumanMessage(from, ai);
     updateMemory(session, msg, ai);
