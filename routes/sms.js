@@ -11,7 +11,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// 🧠 FORMAT DEALS (CONTROLLED — NOT AI)
+// 🧠 FORMAT DEALS
 function formatDeals(deals) {
   return deals.map(d => {
     return `${d.make} ${d.model}
@@ -21,36 +21,42 @@ ${d.due} due`;
   }).join("\n\n\n");
 }
 
-// 🧠 EXTRACT BUDGET
+// 🧠 BUDGET
 function extractBudget(msg) {
   const nums = msg.match(/\d{3,4}/g);
-
   if (!nums) return null;
 
   if (nums.length >= 2) {
-    return {
-      min: Number(nums[0]),
-      max: Number(nums[1])
-    };
+    return { min: Number(nums[0]), max: Number(nums[1]) };
   }
 
-  return {
-    min: 0,
-    max: Number(nums[0])
-  };
+  return { min: 0, max: Number(nums[0]) };
 }
 
-// 🧠 TYPE DETECTION
+// 🧠 TYPE
 function detectType(msg) {
   if (/suv|crossover/.test(msg)) return "suv";
   if (/truck|pickup/.test(msg)) return "truck";
   return null;
 }
 
-// 🧠 SUV FILTER
+// 🧠 LUXURY
+function detectTier(msg) {
+  if (/luxury|premium|nice|higher end/.test(msg)) return "luxury";
+  return null;
+}
+
+function isLuxury(d) {
+  const str = `${d.make} ${d.model}`.toLowerCase();
+  return [
+    "bmw","mercedes","benz","audi","lexus",
+    "infiniti","acura","genesis","porsche"
+  ].some(k => str.includes(k));
+}
+
+// 🧠 TYPE FILTERS
 function isSUV(d) {
   const str = `${d.make} ${d.model}`.toLowerCase();
-
   return [
     "cx","rav4","crv","pilot","tiguan",
     "x1","x3","x5","x7",
@@ -59,40 +65,39 @@ function isSUV(d) {
   ].some(k => str.includes(k));
 }
 
-// 🧠 TRUCK FILTER
 function isTruck(d) {
   const str = `${d.make} ${d.model}`.toLowerCase();
-
   return [
     "tacoma","tundra","frontier",
     "silverado","ram","f150"
   ].some(k => str.includes(k));
 }
 
+// 🧠 BRAND
+function detectBrand(msg) {
+  const brands = ["bmw","mercedes","benz","audi","lexus"];
+  return brands.find(b => msg.includes(b)) || null;
+}
+
 // 🧠 MEMORY
 function updateMemory(session, user, bot) {
   if (!session.history) session.history = [];
-
   session.history.push({ user, bot });
-
-  if (session.history.length > 3) {
-    session.history.shift();
-  }
+  if (session.history.length > 3) session.history.shift();
 }
 
-// 🧠 AI (ONLY GUIDANCE — NO DEAL DATA)
+// 🧠 AI
 async function aiReply(message, context, history) {
   const convo = history?.map(h => `User: ${h.user}\nBroker: ${h.bot}`).join("\n\n") || "";
 
   const prompt = `
-You are a high-end car broker texting a client.
+You are a high-end car broker texting.
 
 Rules:
 - 1-2 lines max
 - no emojis
-- no fluff
-- do NOT list cars or pricing
-- guide the customer naturally
+- no listing cars
+- guide naturally
 
 ${convo}
 
@@ -109,99 +114,158 @@ User: ${message}
   return res.choices[0].message.content.trim();
 }
 
+// 🧠 RANKING
+function rankDeals(deals, session) {
+  function score(d) {
+    let s = 0;
+
+    s += (1000 - d.monthly);
+
+    const due = Number((d.due || "").toString().replace(/[^0-9]/g, "")) || 0;
+    s += (5000 - due) / 10;
+
+    if (Number(d.term) === 36) s += 200;
+
+    if (session.tier === "luxury" && isLuxury(d)) s += 300;
+
+    if (session.brand && d.make.toLowerCase().includes(session.brand)) s += 400;
+
+    return s;
+  }
+
+  const sorted = [...deals].sort((a,b)=>score(b)-score(a));
+
+  return {
+    bestValue: sorted[0],
+    cheapest: [...deals].sort((a,b)=>a.monthly-b.monthly)[0],
+    premium: [...deals].sort((a,b)=>b.monthly-a.monthly)[0]
+  };
+}
+
+// 🧠 NEGOTIATION
+function adjustPayment(deal, newDue) {
+  const term = Number(deal.term);
+
+  const map = {
+    13:77,18:56,24:42,36:28,39:26,48:21
+  };
+
+  const factor = map[term] || 30;
+
+  const currentDue = Number((deal.due || "").replace(/[^0-9]/g,"")) || 0;
+  const diff = (newDue - currentDue) / 1000;
+
+  return Math.round(deal.monthly - (diff * factor));
+}
+
+function extractDown(msg) {
+  const m = msg.match(/(\d+)k|(\d{3,5})/);
+  if (!m) return null;
+  return m[1] ? Number(m[1]) * 1000 : Number(m[2]);
+}
+
 router.post("/", async (req, res) => {
   res.sendStatus(200);
 
   const from = req.body.number || req.body.from;
-  const msg = (req.body.content || req.body.text || "").toLowerCase().trim();
+  const msg = (req.body.content || req.body.text || "").toLowerCase();
 
   const session = getSession(from);
 
   try {
 
-    // 🔥 RESET
-    if (/start over|reset/.test(msg)) {
-      Object.keys(session).forEach(k => delete session[k]);
-
+    // RESET
+    if (/start over/.test(msg)) {
+      Object.keys(session).forEach(k=>delete session[k]);
       await sendHumanMessage(from, "starting fresh — what are you looking for?");
       return;
     }
 
-    // 🔥 GREETING
+    // GREETING
     if (/^hi|hello|hey$/.test(msg)) {
-      const ai = await aiReply(msg, "greet naturally", session.history);
+      const ai = await aiReply(msg,"greet naturally",session.history);
       await sendHumanMessage(from, ai);
-      updateMemory(session, msg, ai);
+      updateMemory(session,msg,ai);
       return;
     }
 
-    // 🧠 EXTRACT INTENT
+    // INTENT
     const budget = extractBudget(msg);
     const type = detectType(msg);
+    const tier = detectTier(msg);
+    const brand = detectBrand(msg);
 
-    if (budget) {
-      session.min = budget.min;
-      session.max = budget.max;
-    }
+    if (budget){ session.min=budget.min; session.max=budget.max; session.lastShown=false;}
+    if (type){ session.type=type; session.lastShown=false;}
+    if (tier){ session.tier=tier; session.lastShown=false;}
+    if (brand){ session.brand=brand; session.lastShown=false;}
 
-    if (type) {
-      session.type = type;
-    }
-
-    // 🧠 GET DEALS
     let deals = await getDeals();
 
-    // ✅ FIXED BUDGET FILTER
-    if (session.min !== undefined && session.max !== undefined) {
-      deals = deals.filter(d =>
-        d.monthly >= session.min &&
-        d.monthly <= session.max
-      );
-    } else if (session.max) {
-      deals = deals.filter(d =>
-        d.monthly <= session.max
-      );
+    // FILTERS
+    if (session.min!==undefined && session.max!==undefined){
+      deals = deals.filter(d=>d.monthly>=session.min && d.monthly<=session.max);
     }
 
-    // ✅ TYPE FILTER
-    if (session.type === "suv") {
-      deals = deals.filter(isSUV);
-    }
+    if (session.type==="suv") deals = deals.filter(isSUV);
+    if (session.type==="truck") deals = deals.filter(isTruck);
+    if (session.tier==="luxury") deals = deals.filter(isLuxury);
 
-    if (session.type === "truck") {
-      deals = deals.filter(isTruck);
-    }
+    // NEGOTIATION
+    if (/down|due|put/.test(msg) && session.activeDeal){
+      const down = extractDown(msg);
+      if (down){
+        const newMonthly = adjustPayment(session.activeDeal, down);
+        const reply = `${session.activeDeal.make} ${session.activeDeal.model}
 
-    // 🧠 DEAL RESPONSE
-    if (session.min !== undefined || session.max !== undefined || /deal|options|suv|truck/.test(msg)) {
+$${newMonthly}/mo with $${down} due
 
-      if (!deals.length) {
-        const reply = "nothing clean in that range — let me check a few angles and follow up with better options";
+(${session.activeDeal.term} mo / ${session.activeDeal.miles})`;
+
         await sendHumanMessage(from, reply);
+        updateMemory(session,msg,reply);
+        return;
+      }
+    }
+
+    // DEAL SEARCH
+    const isSearch = /deal|options|what do you have|available/.test(msg);
+
+    if ((isSearch || budget || type || tier || brand) && !session.lastShown){
+
+      if (!deals.length){
+        await sendHumanMessage(from,"nothing clean there — i’ll follow up with better options");
         return;
       }
 
-      const best = deals.slice(0, 3); // top 3 only
+      const {bestValue,cheapest,premium} = rankDeals(deals,session);
 
-      const list = formatDeals(best);
+      session.activeDeal = bestValue;
 
-      const ai = await aiReply(msg, "recommend one of these deals", session.history);
+      const sections = [
+        `Best value:\n${formatDeals([bestValue])}`,
+        `Cheapest:\n${formatDeals([cheapest])}`,
+        `Premium:\n${formatDeals([premium])}`
+      ].join("\n\n");
 
-      const reply = list + "\n\n" + ai;
+      const ai = await aiReply(msg,"guide toward best deal",session.history);
+
+      const reply = sections + "\n\n" + ai;
+
+      session.lastShown=true;
 
       await sendHumanMessage(from, reply);
-      updateMemory(session, msg, reply);
+      updateMemory(session,msg,reply);
       return;
     }
 
-    // 🧠 DEFAULT
-    const ai = await aiReply(msg, "continue conversation", session.history);
-
+    // DEFAULT
+    const ai = await aiReply(msg,"continue conversation",session.history);
     await sendHumanMessage(from, ai);
-    updateMemory(session, msg, ai);
+    updateMemory(session,msg,ai);
 
-  } catch (err) {
-    console.error("ERROR:", err);
+  } catch(e){
+    console.log("ERROR:",e);
   }
 });
 
