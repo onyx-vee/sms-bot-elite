@@ -1,21 +1,17 @@
 const express = require("express");
 const router = express.Router();
 
+const OpenAI = require("openai");
+
 const { sendHumanMessage } = require("../services/messaging");
 const { getDeals } = require("../services/deals");
 const { getSession } = require("../utils/memory");
 
-// 🧠 PAYMENT RULES
-const leaseAdjust = {
-  13: 77,
-  18: 56,
-  24: 42,
-  36: 28,
-  39: 26,
-  48: 21
-};
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
-// 🧠 FORMAT DEAL
+// 🧠 FORMAT DEAL (ALWAYS CLEAN)
 function formatDeal(d) {
   return `${d.make} ${d.model}
 $${d.monthly}/mo
@@ -40,22 +36,60 @@ function findDeal(msg, deals) {
   );
 }
 
-// 🧠 PARSE MONEY
-function extractMoney(msg) {
-  const match = msg.match(/\$?(\d{3,5})/);
-  return match ? Number(match[1]) : null;
+// 🧠 BUDGET RANGE
+function extractBudgetRange(msg) {
+  const rangeMatch = msg.match(/(\d{3,4})\s?[-to]+\s?(\d{3,4})/);
+
+  if (rangeMatch) {
+    return {
+      min: Number(rangeMatch[1]),
+      max: Number(rangeMatch[2])
+    };
+  }
+
+  const singleMatch = msg.match(/\d{3,4}/);
+
+  if (singleMatch) {
+    return {
+      min: 0,
+      max: Number(singleMatch[0])
+    };
+  }
+
+  return null;
 }
 
-// 🧠 CALCULATE PAYMENT
-function adjustPayment(deal, newDown) {
-  const currentDown = Number(deal.due.replace(/[^0-9]/g, ""));
-  const diff = newDown - currentDown;
+// 🧠 AI RESPONSE (CLARITY + HUMAN)
+async function aiReply({ message, context }) {
+  const prompt = `
+You are a high-end car broker texting a client.
 
-  const factor = leaseAdjust[deal.term] || 30;
+Tone:
+- confident
+- smooth
+- not robotic
+- not salesy
+- short (1–3 sentences max)
 
-  const delta = Math.round((diff / 1000) * factor);
+Goal:
+- guide the deal forward
+- clarify confusion naturally
 
-  return deal.monthly - delta;
+Context:
+${context}
+
+Customer:
+${message}
+
+Respond like a real human broker texting.
+`;
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }]
+  });
+
+  return response.choices[0].message.content;
 }
 
 router.post("/", async (req, res) => {
@@ -78,72 +112,83 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    // GREETING
+    // GREETING (HUMAN)
     if (/^hi|hello|hey$/.test(msg) && !session.started) {
       session.started = true;
 
       await sendHumanMessage(from,
-        "hey—what are you looking to get into?"
+        "hey—what are you looking at right now?"
       );
       return;
     }
 
-    // BUDGET
-    const budget = extractMoney(msg);
-    if (budget && msg.includes("month")) {
-      session.budget = budget;
+    // 🧠 BUDGET
+    const range = extractBudgetRange(msg);
+    if (range) {
+      session.minBudget = range.min;
+      session.maxBudget = range.max;
     }
 
-    // GET DEALS
+    // 🧠 GET DEALS
     const deals = await getDeals(session);
     if (deals.length) session.lastDeals = deals;
 
-    // SELECT CAR
+    // 🧠 FILTER
+    let filtered = deals;
+
+    if (session.maxBudget) {
+      filtered = deals.filter(d =>
+        d.monthly >= (session.minBudget || 0) &&
+        d.monthly <= session.maxBudget
+      );
+    }
+
+    // 🧠 DEAL SELECTION
     const selected = findDeal(msg, session.lastDeals);
+
     if (selected) {
       session.activeDeal = selected;
 
       await sendHumanMessage(from,
         `${selected.make} ${selected.model}
 
-clean deal—want numbers broken down?`
+clean deal—want me to structure numbers on it or compare it to something else?`
       );
       return;
     }
 
-    // NEGOTIATION (DOWN PAYMENT)
-    if (/down|due/.test(msg)) {
+    // 🧠 MAIN SEARCH
+    if (range || /under|budget|month|deal/.test(msg)) {
+
+      if (!filtered.length) {
+        await sendHumanMessage(from,
+          "nothing strong there—want me to stretch it a bit or keep it tight?"
+        );
+        return;
+      }
+
+      const best = pickBest(filtered);
+
+      await sendHumanMessage(from,
+        best.map(formatDeal).join("\n\n")
+      );
+
+      return;
+    }
+
+    // 🧠 FOLLOW UPS (TERMS / DUE)
+    if (/term|miles|due|down/.test(msg)) {
 
       if (!session.activeDeal) {
-        await sendHumanMessage(from, "which car?");
+        const ai = await aiReply({
+          message: msg,
+          context: "User asked about terms but no car selected"
+        });
+
+        await sendHumanMessage(from, ai);
         return;
       }
 
-      const newDown = extractMoney(msg);
-
-      if (!newDown && /0/.test(msg)) {
-        const newPayment = adjustPayment(session.activeDeal, 0);
-
-        await sendHumanMessage(from,
-          `${session.activeDeal.make} ${session.activeDeal.model}
-
-0 down lands around $${newPayment}/mo`
-        );
-        return;
-      }
-
-      if (newDown) {
-        const newPayment = adjustPayment(session.activeDeal, newDown);
-
-        await sendHumanMessage(from,
-          `${session.activeDeal.make} ${session.activeDeal.model}
-
-with $${newDown} down you're around $${newPayment}/mo`
-        );
-        return;
-      }
-
-      // default info
       const d = session.activeDeal;
 
       await sendHumanMessage(from,
@@ -156,59 +201,13 @@ ${d.due} due`
       return;
     }
 
-    // LOWER PAYMENT INTENT
-    if (/lower|cheaper/.test(msg)) {
+    // 🧠 UNKNOWN → AI CLARIFY
+    const ai = await aiReply({
+      message: msg,
+      context: JSON.stringify(session)
+    });
 
-      if (!session.activeDeal) return;
-
-      const d = session.activeDeal;
-
-      const newPayment = adjustPayment(d, 4000);
-
-      await sendHumanMessage(from,
-        `we can get that down to about $${newPayment}/mo with around $4k down
-
-want me to structure it clean?`
-      );
-
-      return;
-    }
-
-    // MAIN SEARCH
-    if (/under|month|deal|options/.test(msg)) {
-
-      const best = pickBest(deals);
-
-      await sendHumanMessage(from,
-        best.map(formatDeal).join("\n\n")
-      );
-
-      return;
-    }
-
-    // SHOW MORE
-    if (/more|all/.test(msg)) {
-      const chunk = session.lastDeals?.slice(0, 8) || [];
-
-      await sendHumanMessage(from,
-        chunk.map(formatDeal).join("\n\n")
-      );
-
-      return;
-    }
-
-    // CLOSE
-    if (/yes|ok|do it/.test(msg)) {
-      await sendHumanMessage(from,
-        "perfect—i’ll get this going\n\nhttps://onyxautocollection.com/1745-2/"
-      );
-      return;
-    }
-
-    // DEFAULT
-    await sendHumanMessage(from,
-      "what kind of car are you leaning toward?"
-    );
+    await sendHumanMessage(from, ai);
 
   } catch (err) {
     console.error("❌ ERROR:", err);
