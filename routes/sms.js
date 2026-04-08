@@ -10,10 +10,9 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// ===== CONFIG =====
 const APPLICATION_LINK = "https://onyxautocollection.com/1745-2/";
 
-// ===== FORMAT =====
+// ===== FORMAT (LOCKED) =====
 function formatDeal(d) {
   return `${d.make} ${d.model}
 
@@ -31,15 +30,15 @@ function extractBudget(msg) {
   return { min: 0, max: +nums[0] };
 }
 
+function detectBrand(msg) {
+  const brands = ["bmw","mercedes","audi","lexus","toyota","honda"];
+  return brands.find(b => msg.includes(b));
+}
+
 function detectType(msg) {
   if (/sedan/.test(msg)) return "sedan";
   if (/suv/.test(msg)) return "suv";
   if (/truck/.test(msg)) return "truck";
-  return null;
-}
-
-function detectTier(msg) {
-  if (/luxury|premium/.test(msg)) return "luxury";
   return null;
 }
 
@@ -57,42 +56,11 @@ function isSUV(d) {
 }
 
 function isTruck(d) {
-  return /tacoma|tundra|f150|ram|silverado|frontier/.test(
-    d.model.toLowerCase()
-  );
+  return /tacoma|tundra|f150|ram|silverado/.test(d.model.toLowerCase());
 }
 
 function isSedan(d) {
   return !isSUV(d) && !isTruck(d);
-}
-
-function isLuxury(d) {
-  return ["bmw","mercedes","audi","lexus","genesis","porsche"]
-    .includes(d.make.toLowerCase());
-}
-
-// ===== RANKING =====
-function scoreDeal(d) {
-  let score = 0;
-
-  score += (1000 - d.monthly);
-
-  const due = Number((d.due || "").replace(/[^0-9]/g,"")) || 0;
-  score += (5000 - due) / 10;
-
-  if (Number(d.term) === 36) score += 200;
-
-  return score;
-}
-
-function rankDeals(deals) {
-  const sortedScore = [...deals].sort((a,b)=>scoreDeal(b)-scoreDeal(a));
-
-  return {
-    best: sortedScore[0],
-    cheapest: deals[0],
-    premium: deals[deals.length - 1]
-  };
 }
 
 // ===== NEGOTIATION =====
@@ -106,7 +74,7 @@ function adjustPayment(deal, newDue) {
   return Math.round(deal.monthly + diff*factor);
 }
 
-// ===== AI (STRICT) =====
+// ===== AI =====
 async function aiReply(message, context) {
   const prompt = `
 You are a high-end car broker.
@@ -114,8 +82,8 @@ You are a high-end car broker.
 Rules:
 - 1 sentence
 - no emojis
-- no car names
 - no pricing
+- no listing cars
 
 User: ${message}
 Context: ${context}
@@ -147,28 +115,33 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    // GREETING
-    if (/^hi|hello|hey$/.test(msg)) {
-      const ai = await aiReply(msg,"greet");
-      await sendHumanMessage(from, ai);
+    let deals = await getDeals();
+
+    // ===== BRAND PRIORITY (FIXES YOUR ISSUE) =====
+    const brand = detectBrand(msg);
+
+    if (brand) {
+      deals = deals.filter(d => d.make.toLowerCase().includes(brand));
+
+      if (!deals.length) {
+        await sendHumanMessage(from,"i’ll check what i can source for that and follow up");
+        return;
+      }
+
+      deals.sort((a,b)=>a.monthly-b.monthly);
+
+      const top = deals.slice(0,3);
+
+      let reply = top.map(formatDeal).join("\n\n");
+
+      await sendHumanMessage(from, reply);
+
+      session.activeDeal = top[0];
       return;
     }
 
-    // ===== LEAD CAPTURE =====
-    if (!session.name && msg.length < 25 && /^[a-z\s]+$/.test(msg)) {
-      session.name = msg;
-      await sendHumanMessage(from, "got it — what zip are you in?");
-      return;
-    }
-
-    if (!session.zip && /\d{5}/.test(msg)) {
-      session.zip = msg.match(/\d{5}/)[0];
-    }
-
-    // ===== INTENT =====
+    // ===== BUDGET =====
     const budget = extractBudget(msg);
-    const type = detectType(msg);
-    const tier = detectTier(msg);
 
     if (budget) {
       session.min = budget.min;
@@ -176,19 +149,14 @@ router.post("/", async (req, res) => {
       session.lastShown = false;
     }
 
+    // ===== TYPE =====
+    const type = detectType(msg);
     if (type) {
       session.type = type;
       session.lastShown = false;
     }
 
-    if (tier) {
-      session.tier = tier;
-      session.lastShown = false;
-    }
-
-    let deals = await getDeals();
-
-    // FILTER
+    // ===== FILTER PIPELINE =====
     if (session.min !== undefined && session.max !== undefined) {
       deals = deals.filter(d => d.monthly >= session.min && d.monthly <= session.max);
     }
@@ -196,8 +164,6 @@ router.post("/", async (req, res) => {
     if (session.type === "suv") deals = deals.filter(isSUV);
     if (session.type === "truck") deals = deals.filter(isTruck);
     if (session.type === "sedan") deals = deals.filter(isSedan);
-
-    if (session.tier === "luxury") deals = deals.filter(isLuxury);
 
     deals.sort((a,b)=>a.monthly-b.monthly);
 
@@ -225,27 +191,17 @@ $${newMonthly}/mo with $${down} due
     if ((isSearch || budget) && !session.lastShown) {
 
       if (!deals.length) {
-        await sendHumanMessage(from,"nothing clean in that lane i’ll rework it");
+        await sendHumanMessage(from,"nothing clean there let me rework it");
         return;
       }
 
-      const { best, cheapest, premium } = rankDeals(deals);
+      const top = deals.slice(0,3);
 
-      let reply = "";
-
-      reply += `Best value:\n${formatDeal(best)}\n\n`;
-
-      if (cheapest !== best) {
-        reply += `Cheapest:\n${formatDeal(cheapest)}\n\n`;
-      }
-
-      if (premium !== best) {
-        reply += `Premium:\n${formatDeal(premium)}`;
-      }
+      let reply = top.map(formatDeal).join("\n\n");
 
       reply += `\n\nthis first one is what i’d lean toward`;
 
-      session.activeDeal = best;
+      session.activeDeal = top[0];
       session.lastShown = true;
 
       await sendHumanMessage(from, reply);
@@ -253,12 +209,12 @@ $${newMonthly}/mo with $${down} due
     }
 
     // ===== CLOSE =====
-    if (/ready|lets do it|lock|apply/.test(msg)) {
-      await sendHumanMessage(from, `perfect — fill this out and i’ll take it from there:\n${APPLICATION_LINK}`);
+    if (/ready|lock|apply/.test(msg)) {
+      await sendHumanMessage(from, APPLICATION_LINK);
       return;
     }
 
-    // DEFAULT
+    // ===== DEFAULT =====
     const ai = await aiReply(msg,"conversation");
     await sendHumanMessage(from, ai);
 
