@@ -11,7 +11,15 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// 🧠 FORMAT DEAL (ALWAYS CLEAN)
+// 🧠 TIME CONTEXT
+function getTimeContext() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "morning";
+  if (hour < 18) return "afternoon";
+  return "evening";
+}
+
+// 🧠 FORMAT DEAL
 function formatDeal(d) {
   return `${d.make} ${d.model}
 $${d.monthly}/mo
@@ -59,29 +67,59 @@ function extractBudgetRange(msg) {
   return null;
 }
 
-// 🧠 AI RESPONSE (CLARITY + HUMAN)
-async function aiReply({ message, context }) {
+// 🧠 MEMORY (LAST 3)
+function updateConversationMemory(session, userMsg, botMsg) {
+  if (!session.history) session.history = [];
+
+  session.history.push({ user: userMsg, bot: botMsg });
+
+  if (session.history.length > 3) {
+    session.history.shift();
+  }
+}
+
+// 🧠 AI RESPONSE
+async function aiReply({ message, deal, context, history }) {
+
+  const convoHistory = history?.length
+    ? history.map(h => `User: ${h.user}\nYou: ${h.bot}`).join("\n\n")
+    : "None";
+
+  const dealContext = deal
+    ? `
+Current Deal:
+${deal.make} ${deal.model}
+$${deal.monthly}/mo
+${deal.term} months
+${deal.due} due
+`
+    : "";
+
   const prompt = `
 You are a high-end car broker texting a client.
 
 Tone:
 - confident
 - smooth
-- not robotic
-- not salesy
-- short (1–3 sentences max)
+- natural
+- short (1–3 lines max)
 
-Goal:
-- guide the deal forward
-- clarify confusion naturally
+Conversation history:
+${convoHistory}
+
+${dealContext}
 
 Context:
 ${context}
 
-Customer:
+Customer message:
 ${message}
 
-Respond like a real human broker texting.
+Rules:
+- no emojis
+- no fluff
+- don't repeat yourself
+- guide toward a decision subtly
 `;
 
   const response = await openai.chat.completions.create({
@@ -102,23 +140,34 @@ router.post("/", async (req, res) => {
   const session = getSession(from);
 
   try {
-    // RESET
+    // 🔥 RESET
     if (/start over|reset/.test(msg)) {
       Object.keys(session).forEach(k => delete session[k]);
 
-      await sendHumanMessage(from,
-        "let’s reset—what are you thinking about getting into?"
-      );
+      const reply = "let’s reset — what are you thinking about?";
+      await sendHumanMessage(from, reply);
       return;
     }
 
-    // GREETING (HUMAN)
-    if (/^hi|hello|hey$/.test(msg) && !session.started) {
+    // 🔥 AI GREETING (TIME + MEMORY)
+    if (/^hi|hello|hey$/.test(msg)) {
+
+      const ai = await aiReply({
+        message: msg,
+        context: `
+Time: ${getTimeContext()}
+Returning: ${session.started ? "yes" : "no"}
+Last car: ${session.lastCar || "none"}
+
+Greet naturally and guide the convo.
+        `,
+        history: session.history
+      });
+
       session.started = true;
 
-      await sendHumanMessage(from,
-        "hey—what are you looking at right now?"
-      );
+      await sendHumanMessage(from, ai);
+      updateConversationMemory(session, msg, ai);
       return;
     }
 
@@ -143,71 +192,111 @@ router.post("/", async (req, res) => {
       );
     }
 
-    // 🧠 DEAL SELECTION
+    // 🧠 INFO / SPECS (AI + SELLING)
+    if (/tell me more|spec|details|features|engine|hp/.test(msg)) {
+
+      const deal = findDeal(msg, session.lastDeals) || session.activeDeal;
+
+      const ai = await aiReply({
+        message: msg,
+        deal,
+        context: "User wants details on a vehicle",
+        history: session.history
+      });
+
+      await sendHumanMessage(from, ai);
+      updateConversationMemory(session, msg, ai);
+      return;
+    }
+
+    // 🧠 SELECT DEAL
     const selected = findDeal(msg, session.lastDeals);
 
     if (selected) {
       session.activeDeal = selected;
+      session.lastCar = `${selected.make} ${selected.model}`;
 
-      await sendHumanMessage(from,
-        `${selected.make} ${selected.model}
+      const ai = await aiReply({
+        message: msg,
+        deal: selected,
+        context: "User is focusing on this car",
+        history: session.history
+      });
 
-clean deal—want me to structure numbers on it or compare it to something else?`
-      );
+      await sendHumanMessage(from, ai);
+      updateConversationMemory(session, msg, ai);
       return;
     }
 
-    // 🧠 MAIN SEARCH
-    if (range || /under|budget|month|deal/.test(msg)) {
+    // 🧠 DEAL SEARCH
+    if (range || /under|budget|month|deal|options/.test(msg)) {
 
       if (!filtered.length) {
-        await sendHumanMessage(from,
-          "nothing strong there—want me to stretch it a bit or keep it tight?"
-        );
+        const ai = await aiReply({
+          message: msg,
+          context: "No deals found in range",
+          history: session.history
+        });
+
+        await sendHumanMessage(from, ai);
+        updateConversationMemory(session, msg, ai);
         return;
       }
 
       const best = pickBest(filtered);
 
-      await sendHumanMessage(from,
-        best.map(formatDeal).join("\n\n")
-      );
+      const list = best.map(formatDeal).join("\n\n");
 
+      const ai = await aiReply({
+        message: msg,
+        deal: best[0],
+        context: `Present these deals:\n${list}`,
+        history: session.history
+      });
+
+      const finalReply = `${list}\n\n${ai}`;
+
+      await sendHumanMessage(from, finalReply);
+      updateConversationMemory(session, msg, finalReply);
       return;
     }
 
-    // 🧠 FOLLOW UPS (TERMS / DUE)
+    // 🧠 FOLLOW UPS
     if (/term|miles|due|down/.test(msg)) {
 
       if (!session.activeDeal) {
         const ai = await aiReply({
           message: msg,
-          context: "User asked about terms but no car selected"
+          context: "User asked about terms without selecting car",
+          history: session.history
         });
 
         await sendHumanMessage(from, ai);
+        updateConversationMemory(session, msg, ai);
         return;
       }
 
       const d = session.activeDeal;
 
-      await sendHumanMessage(from,
-        `${d.make} ${d.model}
-${d.term} mo
-${d.miles} miles
-${d.due} due`
-      );
+      const reply = `${d.make} ${d.model}
+${d.term} months
+${d.miles} miles/year
+${d.due} due at signing`;
 
+      await sendHumanMessage(from, reply);
+      updateConversationMemory(session, msg, reply);
       return;
     }
 
-    // 🧠 UNKNOWN → AI CLARIFY
+    // 🧠 DEFAULT → AI (SMART FALLBACK)
     const ai = await aiReply({
       message: msg,
-      context: JSON.stringify(session)
+      context: JSON.stringify(session),
+      history: session.history
     });
 
     await sendHumanMessage(from, ai);
+    updateConversationMemory(session, msg, ai);
 
   } catch (err) {
     console.error("❌ ERROR:", err);
