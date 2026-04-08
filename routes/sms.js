@@ -11,14 +11,17 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// 🧠 FORMAT DEALS FOR AI
-function formatDealsForAI(deals) {
+// 🧠 FORMAT DEALS (CONTROLLED — NOT AI)
+function formatDeals(deals) {
   return deals.map(d => {
-    return `${d.make} ${d.model} | $${d.monthly}/mo | ${d.term} mo | ${d.miles} miles | ${d.due} due`;
-  }).join("\n");
+    return `${d.make} ${d.model}
+$${d.monthly}/mo
+${d.term} mo / ${d.miles}
+${d.due} due`;
+  }).join("\n\n\n");
 }
 
-// 🧠 EXTRACT BUDGET RANGE
+// 🧠 EXTRACT BUDGET
 function extractBudget(msg) {
   const nums = msg.match(/\d{3,4}/g);
 
@@ -39,14 +42,37 @@ function extractBudget(msg) {
 
 // 🧠 TYPE DETECTION
 function detectType(msg) {
-  if (/suv/.test(msg)) return "suv";
-  if (/truck/.test(msg)) return "truck";
+  if (/suv|crossover/.test(msg)) return "suv";
+  if (/truck|pickup/.test(msg)) return "truck";
   return null;
+}
+
+// 🧠 SUV FILTER
+function isSUV(d) {
+  const str = `${d.make} ${d.model}`.toLowerCase();
+
+  return [
+    "cx","rav4","crv","pilot","tiguan",
+    "x1","x3","x5","x7",
+    "glc","gle","rx","nx","qx","ux",
+    "mdx","rdx","highlander","explorer"
+  ].some(k => str.includes(k));
+}
+
+// 🧠 TRUCK FILTER
+function isTruck(d) {
+  const str = `${d.make} ${d.model}`.toLowerCase();
+
+  return [
+    "tacoma","tundra","frontier",
+    "silverado","ram","f150"
+  ].some(k => str.includes(k));
 }
 
 // 🧠 MEMORY
 function updateMemory(session, user, bot) {
   if (!session.history) session.history = [];
+
   session.history.push({ user, bot });
 
   if (session.history.length > 3) {
@@ -54,41 +80,25 @@ function updateMemory(session, user, bot) {
   }
 }
 
-// 🧠 AI RESPONSE (MASTER)
-async function aiReply({ message, deals, context, history }) {
-
-  const convo = history?.map(h =>
-    `User: ${h.user}\nBroker: ${h.bot}`
-  ).join("\n\n") || "";
-
-  const dealData = deals.length
-    ? formatDealsForAI(deals)
-    : "NO DEALS FOUND";
+// 🧠 AI (ONLY GUIDANCE — NO DEAL DATA)
+async function aiReply(message, context, history) {
+  const convo = history?.map(h => `User: ${h.user}\nBroker: ${h.bot}`).join("\n\n") || "";
 
   const prompt = `
 You are a high-end car broker texting a client.
 
-IMPORTANT RULES:
-- ONLY use the deals provided below
-- NEVER make up pricing or cars
-- If no deals match, say you'll follow up with options
-- Keep responses clean and natural
-- Format deals clearly line by line
-- 2-4 lines max
+Rules:
+- 1-2 lines max
+- no emojis
+- no fluff
+- do NOT list cars or pricing
+- guide the customer naturally
 
-Conversation:
 ${convo}
 
-Deals:
-${dealData}
+Context: ${context}
 
-Context:
-${context}
-
-User:
-${message}
-
-Respond like a real broker texting.
+User: ${message}
 `;
 
   const res = await openai.chat.completions.create({
@@ -102,8 +112,8 @@ Respond like a real broker texting.
 router.post("/", async (req, res) => {
   res.sendStatus(200);
 
-  const from = req.body.number;
-  const msg = (req.body.content || "").toLowerCase().trim();
+  const from = req.body.number || req.body.from;
+  const msg = (req.body.content || req.body.text || "").toLowerCase().trim();
 
   const session = getSession(from);
 
@@ -114,6 +124,14 @@ router.post("/", async (req, res) => {
       Object.keys(session).forEach(k => delete session[k]);
 
       await sendHumanMessage(from, "starting fresh — what are you looking for?");
+      return;
+    }
+
+    // 🔥 GREETING
+    if (/^hi|hello|hey$/.test(msg)) {
+      const ai = await aiReply(msg, "greet naturally", session.history);
+      await sendHumanMessage(from, ai);
+      updateMemory(session, msg, ai);
       return;
     }
 
@@ -130,36 +148,54 @@ router.post("/", async (req, res) => {
       session.type = type;
     }
 
-    // 🧠 GET DEALS FROM SHEET
+    // 🧠 GET DEALS
     let deals = await getDeals();
 
-    // 🧠 FILTER
-    if (session.max) {
-      deals = deals.filter(d => d.monthly <= session.max);
+    // ✅ FIXED BUDGET FILTER
+    if (session.min !== undefined && session.max !== undefined) {
+      deals = deals.filter(d =>
+        d.monthly >= session.min &&
+        d.monthly <= session.max
+      );
+    } else if (session.max) {
+      deals = deals.filter(d =>
+        d.monthly <= session.max
+      );
     }
 
+    // ✅ TYPE FILTER
     if (session.type === "suv") {
-      deals = deals.filter(d =>
-        /cx|rav4|crv|x|glc|gle|rx|qx/i.test(`${d.make} ${d.model}`)
-      );
+      deals = deals.filter(isSUV);
     }
 
     if (session.type === "truck") {
-      deals = deals.filter(d =>
-        /tacoma|tundra|f150|ram|silverado/i.test(d.model)
-      );
+      deals = deals.filter(isTruck);
     }
 
-    // 🧠 LIMIT (important for AI quality)
-    const topDeals = deals.slice(0, 5);
+    // 🧠 DEAL RESPONSE
+    if (session.min !== undefined || session.max !== undefined || /deal|options|suv|truck/.test(msg)) {
 
-    // 🧠 AI RESPONSE (ALWAYS)
-    const ai = await aiReply({
-      message: msg,
-      deals: topDeals,
-      context: "User shopping for lease",
-      history: session.history
-    });
+      if (!deals.length) {
+        const reply = "nothing clean in that range — let me check a few angles and follow up with better options";
+        await sendHumanMessage(from, reply);
+        return;
+      }
+
+      const best = deals.slice(0, 3); // top 3 only
+
+      const list = formatDeals(best);
+
+      const ai = await aiReply(msg, "recommend one of these deals", session.history);
+
+      const reply = list + "\n\n" + ai;
+
+      await sendHumanMessage(from, reply);
+      updateMemory(session, msg, reply);
+      return;
+    }
+
+    // 🧠 DEFAULT
+    const ai = await aiReply(msg, "continue conversation", session.history);
 
     await sendHumanMessage(from, ai);
     updateMemory(session, msg, ai);
