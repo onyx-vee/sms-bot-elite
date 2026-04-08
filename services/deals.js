@@ -1,4 +1,3 @@
-
 const { getPricingRows } = require("./sheets");
 
 function cleanNumber(val) {
@@ -6,17 +5,15 @@ function cleanNumber(val) {
   return Number(val.toString().replace(/[^0-9.]/g, ""));
 }
 
-async function getDeals(filters) {
+async function getDeals() {
   const rows = await getPricingRows();
+
   let deals = [];
 
   for (let row of rows) {
-    const make = row[0]?.toLowerCase();
     const monthly = cleanNumber(row[2]);
 
     if (!monthly) continue;
-    if (filters.budget && monthly > filters.budget) continue;
-    if (filters.brand && !make.includes(filters.brand)) continue;
 
     deals.push({
       make: row[0],
@@ -28,7 +25,9 @@ async function getDeals(filters) {
     });
   }
 
+  // sort cheapest first
   deals.sort((a, b) => a.monthly - b.monthly);
+
   return deals;
 }
 
