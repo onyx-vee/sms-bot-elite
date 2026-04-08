@@ -31,7 +31,7 @@ function detectType(msg) {
 }
 
 function detectBrand(msg) {
-  const brands = ["bmw","mercedes","audi","lexus","toyota","honda"];
+  const brands = ["bmw","mercedes","audi","lexus","toyota","honda","nissan","mazda"];
   return brands.find(b => msg.includes(b));
 }
 
@@ -50,6 +50,34 @@ function isSedan(d) {
   return !isSUV(d) && !isTruck(d);
 }
 
+// ===== NEGOTIATION =====
+function extractDown(msg) {
+  if (msg.includes("0")) return 0;
+
+  const m = msg.match(/(\d+)/);
+  if (!m) return null;
+
+  let val = parseInt(m[1]);
+  if (val < 100) val = val * 1000;
+
+  return val;
+}
+
+function adjustPayment(deal, newDown) {
+  const map = {13:77,18:56,24:42,36:28,39:26,48:21};
+
+  const term = Number(deal.term);
+  const factor = map[term] || 30;
+
+  const currentDue = parseInt(
+    (deal.due || "").replace(/[^0-9]/g,"")
+  ) || 0;
+
+  const diff = (currentDue - newDown) / 1000;
+
+  return Math.round(deal.monthly + diff * factor);
+}
+
 // ===== ROUTE =====
 router.post("/", async (req, res) => {
   res.sendStatus(200);
@@ -61,43 +89,66 @@ router.post("/", async (req, res) => {
 
   try {
 
-    // RESET
+    // ===== RESET =====
     if (/start over/.test(msg)) {
       Object.keys(session).forEach(k=>delete session[k]);
       await sendHumanMessage(from,"starting fresh — what are you trying to get into?");
       return;
     }
 
-    // HELLO
+    // ===== GREETING =====
     if (/^hi|hello|hey$/.test(msg)) {
       await sendHumanMessage(from,"what are you trying to get into?");
       return;
     }
 
-    // ===== HANDLE "CHEAP" PROPERLY =====
-    if (/cheap|low|budget/.test(msg) && !session.budget) {
+    // ===== HANDLE "CHEAP" =====
+    if (/cheap|low|budget/.test(msg) && !session.max) {
       await sendHumanMessage(from,"got you — where do you want to be monthly? like 300, 400, 500?");
       return;
     }
 
-    // ===== BUDGET =====
+    // ===== NEGOTIATION (FIXED) =====
+    if (/down/.test(msg) && session.activeDeal) {
+
+      const newDown = extractDown(msg);
+
+      if (newDown !== null) {
+        const newMonthly = adjustPayment(session.activeDeal, newDown);
+
+        await sendHumanMessage(from,
+`${session.activeDeal.make} ${session.activeDeal.model}
+$${newMonthly}/mo with $${newDown} due
+(${session.activeDeal.term} mo / ${session.activeDeal.miles})`
+        );
+
+        return;
+      }
+    }
+
+    // ===== INTENT =====
     const budget = extractBudget(msg);
     if (budget) {
       session.min = budget.min;
       session.max = budget.max;
+      session.shown = false;
     }
 
-    // ===== TYPE =====
     const type = detectType(msg);
-    if (type) session.type = type;
+    if (type) {
+      session.type = type;
+      session.shown = false;
+    }
 
-    // ===== BRAND =====
     const brand = detectBrand(msg);
-    if (brand) session.brand = brand;
+    if (brand) {
+      session.brand = brand;
+      session.shown = false;
+    }
 
     let deals = await getDeals();
 
-    // ===== APPLY FILTERS =====
+    // ===== FILTER =====
     if (session.min !== undefined && session.max !== undefined) {
       deals = deals.filter(d => d.monthly >= session.min && d.monthly <= session.max);
     }
@@ -112,7 +163,7 @@ router.post("/", async (req, res) => {
 
     deals.sort((a,b)=>a.monthly-b.monthly);
 
-    // ===== IF NO BUDGET YET =====
+    // ===== NEED BUDGET =====
     if (!session.max) {
       await sendHumanMessage(from,"what monthly are you trying to stay around?");
       return;
@@ -139,21 +190,23 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    // ===== GUIDE NEXT STEP =====
-    if (session.shown && !session.nextStep) {
-      session.nextStep = true;
-      await sendHumanMessage(from,"want me to lock something in or tweak it a bit?");
+    // ===== POST-DEAL GUIDANCE =====
+    if (session.shown && !session.prompted) {
+      session.prompted = true;
+      await sendHumanMessage(from,"want me to lock it in or adjust numbers a bit?");
       return;
     }
 
     // ===== CLOSE =====
-    if (/yes|lock|do it/.test(msg)) {
-      await sendHumanMessage(from, `perfect — fill this out and i’ll lock it in:\n${APPLICATION_LINK}`);
+    if (/yes|lock|do it|apply/.test(msg)) {
+      await sendHumanMessage(from,
+`perfect — fill this out and i’ll lock it in:
+${APPLICATION_LINK}`);
       return;
     }
 
     // ===== DEFAULT =====
-    await sendHumanMessage(from,"what direction do you want to go — suv, sedan, or something specific?");
+    await sendHumanMessage(from,"what do you want to adjust — price, car, or payment?");
 
   } catch (e) {
     console.log("ERROR:", e);
