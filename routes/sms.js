@@ -12,13 +12,11 @@ const openai = new OpenAI({
 
 const APPLICATION_LINK = "https://onyxautocollection.com/1745-2/";
 
-// ===== FORMAT (LOCKED) =====
+// ===== FORMAT =====
 function formatDeal(d) {
   return `${d.make} ${d.model}
-
 $${d.monthly}/mo
 ${d.term} mo / ${d.miles}
-
 $${d.due} due`;
 }
 
@@ -31,7 +29,7 @@ function extractBudget(msg) {
 }
 
 function detectBrand(msg) {
-  const brands = ["bmw","mercedes","audi","lexus","toyota","honda"];
+  const brands = ["bmw","mercedes","audi","lexus","toyota","honda","nissan","mazda"];
   return brands.find(b => msg.includes(b));
 }
 
@@ -56,7 +54,9 @@ function isSUV(d) {
 }
 
 function isTruck(d) {
-  return /tacoma|tundra|f150|ram|silverado/.test(d.model.toLowerCase());
+  return /tacoma|tundra|f150|ram|silverado|frontier/.test(
+    d.model.toLowerCase()
+  );
 }
 
 function isSedan(d) {
@@ -77,13 +77,25 @@ function adjustPayment(deal, newDue) {
 // ===== AI =====
 async function aiReply(message, context) {
   const prompt = `
-You are a high-end car broker.
+You are a high-end car broker in Los Angeles.
+
+Tone:
+- smooth
+- confident
+- efficient
+- never robotic
+- never dismissive
 
 Rules:
-- 1 sentence
+- 1 short sentence
 - no emojis
 - no pricing
-- no listing cars
+- guide the deal forward
+
+Behavior:
+- If user says cheap/budget → convert to monthly
+- Keep control of conversation
+- Always move toward a deal
 
 User: ${message}
 Context: ${context}
@@ -111,20 +123,20 @@ router.post("/", async (req, res) => {
     // RESET
     if (/start over/.test(msg)) {
       Object.keys(session).forEach(k=>delete session[k]);
-      await sendHumanMessage(from,"starting fresh what are you thinking");
+      await sendHumanMessage(from,"starting fresh — what are you thinking?");
       return;
     }
 
     let deals = await getDeals();
 
-    // ===== BRAND PRIORITY (FIXES YOUR ISSUE) =====
+    // ===== BRAND PRIORITY =====
     const brand = detectBrand(msg);
 
     if (brand) {
       deals = deals.filter(d => d.make.toLowerCase().includes(brand));
 
       if (!deals.length) {
-        await sendHumanMessage(from,"i’ll check what i can source for that and follow up");
+        await sendHumanMessage(from,"i’ll check what i can source for that and circle back");
         return;
       }
 
@@ -156,7 +168,7 @@ router.post("/", async (req, res) => {
       session.lastShown = false;
     }
 
-    // ===== FILTER PIPELINE =====
+    // ===== FILTER =====
     if (session.min !== undefined && session.max !== undefined) {
       deals = deals.filter(d => d.monthly >= session.min && d.monthly <= session.max);
     }
@@ -175,9 +187,7 @@ router.post("/", async (req, res) => {
         const newMonthly = adjustPayment(session.activeDeal, down);
 
         const reply = `${session.activeDeal.make} ${session.activeDeal.model}
-
 $${newMonthly}/mo with $${down} due
-
 (${session.activeDeal.term} mo / ${session.activeDeal.miles})`;
 
         await sendHumanMessage(from, reply);
@@ -191,7 +201,7 @@ $${newMonthly}/mo with $${down} due
     if ((isSearch || budget) && !session.lastShown) {
 
       if (!deals.length) {
-        await sendHumanMessage(from,"nothing clean there let me rework it");
+        await sendHumanMessage(from,"nothing clean there — let me tighten it up for you");
         return;
       }
 
@@ -199,7 +209,7 @@ $${newMonthly}/mo with $${down} due
 
       let reply = top.map(formatDeal).join("\n\n");
 
-      reply += `\n\nthis first one is what i’d lean toward`;
+      reply += `\n\nfirst one is the strongest value`;
 
       session.activeDeal = top[0];
       session.lastShown = true;
@@ -210,7 +220,7 @@ $${newMonthly}/mo with $${down} due
 
     // ===== CLOSE =====
     if (/ready|lock|apply/.test(msg)) {
-      await sendHumanMessage(from, APPLICATION_LINK);
+      await sendHumanMessage(from, `perfect — fill this out and i’ll lock it in:\n${APPLICATION_LINK}`);
       return;
     }
 
