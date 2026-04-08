@@ -1,9 +1,8 @@
-
 const sessions = {};
 
-function getSession(user) {
-  if (!sessions[user]) sessions[user] = {};
-  return sessions[user];
+function getSession(id) {
+  if (!sessions[id]) sessions[id] = {};
+  return sessions[id];
 }
 
 module.exports = { getSession };

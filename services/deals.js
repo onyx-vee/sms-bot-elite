@@ -8,27 +8,14 @@ function cleanNumber(val) {
 async function getDeals() {
   const rows = await getPricingRows();
 
-  let deals = [];
-
-  for (let row of rows) {
-    const monthly = cleanNumber(row[2]);
-
-    if (!monthly) continue;
-
-    deals.push({
-      make: row[0],
-      model: row[1],
-      monthly,
-      due: row[3],
-      term: row[4],
-      miles: row[5]
-    });
-  }
-
-  // sort cheapest first
-  deals.sort((a, b) => a.monthly - b.monthly);
-
-  return deals;
+  return rows.map(row => ({
+    make: row[0],
+    model: row[1],
+    monthly: cleanNumber(row[2]),
+    due: row[3],
+    term: row[4],
+    miles: row[5]
+  })).filter(d => d.monthly);
 }
 
 module.exports = { getDeals };
