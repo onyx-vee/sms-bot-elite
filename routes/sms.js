@@ -11,7 +11,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// 🧠 TIME CONTEXT
+// 🧠 TIME
 function getTimeContext() {
   const hour = new Date().getHours();
   if (hour < 12) return "morning";
@@ -19,7 +19,7 @@ function getTimeContext() {
   return "evening";
 }
 
-// 🧠 FORMAT DEAL
+// 🧠 FORMAT DEAL (FORCES CLEAN LINES)
 function formatDeal(d) {
   return `${d.make} ${d.model}
 $${d.monthly}/mo
@@ -67,7 +67,15 @@ function extractBudgetRange(msg) {
   return null;
 }
 
-// 🧠 MEMORY (LAST 3)
+// 🧠 VEHICLE TYPE DETECTION
+function detectType(msg) {
+  if (/suv|crossover/.test(msg)) return "suv";
+  if (/truck|pickup/.test(msg)) return "truck";
+  if (/sedan|car/.test(msg)) return "sedan";
+  return null;
+}
+
+// 🧠 MEMORY
 function updateConversationMemory(session, userMsg, botMsg) {
   if (!session.history) session.history = [];
 
@@ -78,7 +86,7 @@ function updateConversationMemory(session, userMsg, botMsg) {
   }
 }
 
-// 🧠 AI RESPONSE
+// 🧠 AI RESPONSE (CONTROLLED)
 async function aiReply({ message, deal, context, history }) {
 
   const convoHistory = history?.length
@@ -101,10 +109,9 @@ You are a high-end car broker texting a client.
 Tone:
 - confident
 - smooth
-- natural
-- short (1–3 lines max)
+- short (1–2 lines max)
 
-Conversation history:
+Conversation:
 ${convoHistory}
 
 ${dealContext}
@@ -112,14 +119,14 @@ ${dealContext}
 Context:
 ${context}
 
-Customer message:
+Customer:
 ${message}
 
 Rules:
 - no emojis
 - no fluff
-- don't repeat yourself
-- guide toward a decision subtly
+- don't override pricing or facts
+- guide forward naturally
 `;
 
   const response = await openai.chat.completions.create({
@@ -149,7 +156,7 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    // 🔥 AI GREETING (TIME + MEMORY)
+    // 🔥 GREETING (AI, NO FORCING)
     if (/^hi|hello|hey$/.test(msg)) {
 
       const ai = await aiReply({
@@ -157,9 +164,9 @@ router.post("/", async (req, res) => {
         context: `
 Time: ${getTimeContext()}
 Returning: ${session.started ? "yes" : "no"}
-Last car: ${session.lastCar || "none"}
 
-Greet naturally and guide the convo.
+Do not assume previous car.
+Keep it natural.
         `,
         history: session.history
       });
@@ -178,21 +185,38 @@ Greet naturally and guide the convo.
       session.maxBudget = range.max;
     }
 
+    // 🧠 TYPE
+    const type = detectType(msg);
+    if (type) session.type = type;
+
     // 🧠 GET DEALS
     const deals = await getDeals(session);
     if (deals.length) session.lastDeals = deals;
 
-    // 🧠 FILTER
     let filtered = deals;
 
+    // budget filter
     if (session.maxBudget) {
-      filtered = deals.filter(d =>
+      filtered = filtered.filter(d =>
         d.monthly >= (session.minBudget || 0) &&
         d.monthly <= session.maxBudget
       );
     }
 
-    // 🧠 INFO / SPECS (AI + SELLING)
+    // 🚨 TYPE FILTER (FIXED)
+    if (session.type === "suv") {
+      filtered = filtered.filter(d =>
+        /cx|rav4|crv|pilot|tiguan|x3|x5|glc|rx|qx|ux|suv/i.test(d.model)
+      );
+    }
+
+    if (session.type === "truck") {
+      filtered = filtered.filter(d =>
+        /tacoma|tundra|frontier|silverado|ram|f150/i.test(d.model)
+      );
+    }
+
+    // 🧠 INFO / SPECS (AI)
     if (/tell me more|spec|details|features|engine|hp/.test(msg)) {
 
       const deal = findDeal(msg, session.lastDeals) || session.activeDeal;
@@ -200,7 +224,7 @@ Greet naturally and guide the convo.
       const ai = await aiReply({
         message: msg,
         deal,
-        context: "User wants details on a vehicle",
+        context: "User wants info on this car",
         history: session.history
       });
 
@@ -228,36 +252,30 @@ Greet naturally and guide the convo.
       return;
     }
 
-    // 🧠 DEAL SEARCH
-    if (range || /under|budget|month|deal|options/.test(msg)) {
+    // 🧠 DEAL SEARCH (FIXED)
+    if (range || /under|budget|month|deal|options|suv|truck/.test(msg)) {
 
       if (!filtered.length) {
-        const ai = await aiReply({
-          message: msg,
-          context: "No deals found in range",
-          history: session.history
-        });
-
-        await sendHumanMessage(from, ai);
-        updateConversationMemory(session, msg, ai);
+        const reply = "nothing clean in that lane — want me to expand it a bit?";
+        await sendHumanMessage(from, reply);
+        updateConversationMemory(session, msg, reply);
         return;
       }
 
       const best = pickBest(filtered);
-
       const list = best.map(formatDeal).join("\n\n");
 
       const ai = await aiReply({
         message: msg,
         deal: best[0],
-        context: `Present these deals:\n${list}`,
+        context: "User browsing options",
         history: session.history
       });
 
-      const finalReply = `${list}\n\n${ai}`;
+      const reply = `${list}\n\n${ai}`;
 
-      await sendHumanMessage(from, finalReply);
-      updateConversationMemory(session, msg, finalReply);
+      await sendHumanMessage(from, reply);
+      updateConversationMemory(session, msg, reply);
       return;
     }
 
@@ -267,7 +285,7 @@ Greet naturally and guide the convo.
       if (!session.activeDeal) {
         const ai = await aiReply({
           message: msg,
-          context: "User asked about terms without selecting car",
+          context: "User asked about terms but no car selected",
           history: session.history
         });
 
@@ -288,10 +306,10 @@ ${d.due} due at signing`;
       return;
     }
 
-    // 🧠 DEFAULT → AI (SMART FALLBACK)
+    // 🧠 DEFAULT (AI SAFE)
     const ai = await aiReply({
       message: msg,
-      context: JSON.stringify(session),
+      context: "User message unclear",
       history: session.history
     });
 
