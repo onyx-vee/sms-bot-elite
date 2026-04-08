@@ -11,7 +11,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// 🧠 TIME
+// 🧠 TIME CONTEXT
 function getTimeContext() {
   const hour = new Date().getHours();
   if (hour < 12) return "morning";
@@ -21,10 +21,12 @@ function getTimeContext() {
 
 // 🧠 FORMAT DEAL (FORCES CLEAN LINES)
 function formatDeal(d) {
-  return `${d.make} ${d.model}
-$${d.monthly}/mo
-${d.term} mo / ${d.miles}
-${d.due} due`;
+  return [
+    `${d.make} ${d.model}`,
+    `$${d.monthly}/mo`,
+    `${d.term} mo / ${d.miles}`,
+    `${d.due} due`
+  ].join("\n");
 }
 
 // 🧠 PICK BEST
@@ -67,7 +69,7 @@ function extractBudgetRange(msg) {
   return null;
 }
 
-// 🧠 VEHICLE TYPE DETECTION
+// 🧠 VEHICLE TYPE
 function detectType(msg) {
   if (/suv|crossover/.test(msg)) return "suv";
   if (/truck|pickup/.test(msg)) return "truck";
@@ -88,23 +90,21 @@ function updateConversationMemory(session, userMsg, botMsg) {
 
 // 🧠 AI RESPONSE (CONTROLLED)
 async function aiReply({ message, deal, context, history }) {
-
   const convoHistory = history?.length
-    ? history.map(h => `User: ${h.user}\nYou: ${h.bot}`).join("\n\n")
+    ? history.map(h => `User: ${h.user}\nAssistant: ${h.bot}`).join("\n\n")
     : "None";
 
   const dealContext = deal
-    ? `
-Current Deal:
-${deal.make} ${deal.model}
-$${deal.monthly}/mo
-${deal.term} months
-${deal.due} due
-`
+    ? `Deal: ${deal.make} ${deal.model} at $${deal.monthly}/mo`
     : "";
 
   const prompt = `
 You are a high-end car broker texting a client.
+
+IMPORTANT:
+- NEVER say "You:" or "Assistant:"
+- NEVER narrate
+- ONLY reply as a text message
 
 Tone:
 - confident
@@ -122,11 +122,7 @@ ${context}
 Customer:
 ${message}
 
-Rules:
-- no emojis
-- no fluff
-- don't override pricing or facts
-- guide forward naturally
+Respond naturally like a real broker.
 `;
 
   const response = await openai.chat.completions.create({
@@ -134,7 +130,7 @@ Rules:
     messages: [{ role: "user", content: prompt }]
   });
 
-  return response.choices[0].message.content;
+  return response.choices[0].message.content.trim();
 }
 
 router.post("/", async (req, res) => {
@@ -156,18 +152,12 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    // 🔥 GREETING (AI, NO FORCING)
+    // 🔥 GREETING (AI)
     if (/^hi|hello|hey$/.test(msg)) {
 
       const ai = await aiReply({
         message: msg,
-        context: `
-Time: ${getTimeContext()}
-Returning: ${session.started ? "yes" : "no"}
-
-Do not assume previous car.
-Keep it natural.
-        `,
+        context: `Time: ${getTimeContext()}, returning: ${session.started ? "yes" : "no"}`,
         history: session.history
       });
 
@@ -203,10 +193,10 @@ Keep it natural.
       );
     }
 
-    // 🚨 TYPE FILTER (FIXED)
+    // 🚨 TYPE FILTER
     if (session.type === "suv") {
       filtered = filtered.filter(d =>
-        /cx|rav4|crv|pilot|tiguan|x3|x5|glc|rx|qx|ux|suv/i.test(d.model)
+        /cx|rav4|crv|pilot|tiguan|x|glc|rx|qx|ux/i.test(d.model)
       );
     }
 
@@ -216,15 +206,45 @@ Keep it natural.
       );
     }
 
-    // 🧠 INFO / SPECS (AI)
-    if (/tell me more|spec|details|features|engine|hp/.test(msg)) {
+    // 🧠 BMW HANDLER
+    if (/bmw/.test(msg)) {
+
+      let brandDeals = deals.filter(d =>
+        d.make.toLowerCase().includes("bmw")
+      );
+
+      if (/suv/.test(msg)) {
+        brandDeals = brandDeals.filter(d =>
+          /x1|x3|x5|x7/i.test(d.model)
+        );
+      }
+
+      const best = pickBest(brandDeals);
+      const list = best.map(formatDeal).join("\n\n");
+
+      await sendHumanMessage(from, list);
+      return;
+    }
+
+    // 🧠 CONTINUATION
+    if (/anything else|more|other/.test(msg)) {
+      const moreDeals = session.lastDeals?.slice(2, 5) || [];
+
+      const list = moreDeals.map(formatDeal).join("\n\n");
+
+      await sendHumanMessage(from, list);
+      return;
+    }
+
+    // 🧠 INFO / SPECS
+    if (/tell me more|spec|details|features/.test(msg)) {
 
       const deal = findDeal(msg, session.lastDeals) || session.activeDeal;
 
       const ai = await aiReply({
         message: msg,
         deal,
-        context: "User wants info on this car",
+        context: "Explain vehicle and guide decision",
         history: session.history
       });
 
@@ -243,7 +263,7 @@ Keep it natural.
       const ai = await aiReply({
         message: msg,
         deal: selected,
-        context: "User is focusing on this car",
+        context: "User focusing on this car",
         history: session.history
       });
 
@@ -252,15 +272,8 @@ Keep it natural.
       return;
     }
 
-    // 🧠 DEAL SEARCH (FIXED)
-    if (range || /under|budget|month|deal|options|suv|truck/.test(msg)) {
-
-      if (!filtered.length) {
-        const reply = "nothing clean in that lane — want me to expand it a bit?";
-        await sendHumanMessage(from, reply);
-        updateConversationMemory(session, msg, reply);
-        return;
-      }
+    // 🧠 DEAL SEARCH
+    if (range || /deal|options|suv|truck|budget/.test(msg)) {
 
       const best = pickBest(filtered);
       const list = best.map(formatDeal).join("\n\n");
@@ -268,7 +281,7 @@ Keep it natural.
       const ai = await aiReply({
         message: msg,
         deal: best[0],
-        context: "User browsing options",
+        context: "Recommend best option briefly",
         history: session.history
       });
 
@@ -279,37 +292,10 @@ Keep it natural.
       return;
     }
 
-    // 🧠 FOLLOW UPS
-    if (/term|miles|due|down/.test(msg)) {
-
-      if (!session.activeDeal) {
-        const ai = await aiReply({
-          message: msg,
-          context: "User asked about terms but no car selected",
-          history: session.history
-        });
-
-        await sendHumanMessage(from, ai);
-        updateConversationMemory(session, msg, ai);
-        return;
-      }
-
-      const d = session.activeDeal;
-
-      const reply = `${d.make} ${d.model}
-${d.term} months
-${d.miles} miles/year
-${d.due} due at signing`;
-
-      await sendHumanMessage(from, reply);
-      updateConversationMemory(session, msg, reply);
-      return;
-    }
-
-    // 🧠 DEFAULT (AI SAFE)
+    // 🧠 DEFAULT
     const ai = await aiReply({
       message: msg,
-      context: "User message unclear",
+      context: "User unclear",
       history: session.history
     });
 
