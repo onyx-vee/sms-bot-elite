@@ -13,11 +13,19 @@ ${d.term} mo / ${d.miles}
 $${d.due} due`;
 }
 
-// ===== CLASSIFICATION =====
+// ===== REAL SUV DETECTION (FIXED) =====
 function isSUV(d) {
-  return /x|gl|rx|nx|qx|cx|rav4|crv|pilot|tiguan|gle|glc|gla|glb/.test(
-    `${d.make} ${d.model}`.toLowerCase()
-  );
+  const text = `${d.make} ${d.model}`.toLowerCase();
+
+  const suvKeywords = [
+    "x1","x3","x5","x7",
+    "gl","gla","glb","glc","gle",
+    "rx","nx","qx",
+    "cx","rav4","crv","pilot","tiguan","highlander",
+    "ux","gx","lx"
+  ];
+
+  return suvKeywords.some(k => text.includes(k));
 }
 
 function isTruck(d) {
@@ -28,19 +36,43 @@ function isSedan(d) {
   return !isSUV(d) && !isTruck(d);
 }
 
+// ===== RESPONSE VARIATION (HUGE UPGRADE) =====
+function getCloserLine() {
+  const options = [
+    "this one makes the most sense overall",
+    "this is probably the move right now",
+    "this is the strongest deal in the group",
+    "this one is where i’d lean",
+    "this is the cleanest setup i’m seeing"
+  ];
+
+  return options[Math.floor(Math.random() * options.length)];
+}
+
+// ===== GREETING =====
+function getGreeting() {
+  const options = [
+    "hey — what are you looking at right now?",
+    "what are you thinking about getting into?",
+    "what kind of car are you in the market for?",
+    "what are you trying to switch into?"
+  ];
+
+  return options[Math.floor(Math.random() * options.length)];
+}
+
 // ===== INTENT ENGINE =====
 function updateIntent(msg, session) {
   if (!session.intent) session.intent = {};
-
   const intent = session.intent;
 
-  // ===== HARD RESET CONDITIONS =====
+  // HARD RESET
   if (msg.includes("start over")) {
     session.intent = {};
     return;
   }
 
-  // ===== BRAND (overwrites old)
+  // BRAND (overwrite)
   const brands = ["bmw","mercedes","audi","lexus","toyota","honda"];
   brands.forEach(b => {
     if (msg.includes(b)) {
@@ -48,26 +80,21 @@ function updateIntent(msg, session) {
     }
   });
 
-  // ===== TYPE (overwrites old)
+  // TYPE (overwrite + reset model)
   if (msg.includes("suv")) {
     intent.type = "suv";
     delete intent.model;
   }
 
-  if (msg.includes("sedan")) {
-    intent.type = "sedan";
-  }
+  if (msg.includes("sedan")) intent.type = "sedan";
+  if (msg.includes("truck")) intent.type = "truck";
 
-  if (msg.includes("truck")) {
-    intent.type = "truck";
-  }
-
-  // ===== BUDGET
+  // BUDGET
   const nums = msg.match(/\d{3,4}/);
   if (nums) intent.budget = parseInt(nums[0]);
 }
 
-// ===== FILTER ENGINE =====
+// ===== FILTER =====
 function filterDeals(deals, intent) {
 
   if (!intent) return deals;
@@ -78,32 +105,15 @@ function filterDeals(deals, intent) {
     );
   }
 
-  if (intent.type === "suv") {
-    deals = deals.filter(isSUV);
-  }
-
-  if (intent.type === "sedan") {
-    deals = deals.filter(isSedan);
-  }
-
-  if (intent.type === "truck") {
-    deals = deals.filter(isTruck);
-  }
+  if (intent.type === "suv") deals = deals.filter(isSUV);
+  if (intent.type === "sedan") deals = deals.filter(isSedan);
+  if (intent.type === "truck") deals = deals.filter(isTruck);
 
   if (intent.budget) {
     deals = deals.filter(d => d.monthly <= intent.budget);
   }
 
   return deals;
-}
-
-// ===== HUMAN TONE =====
-function getGreeting() {
-  const hour = new Date().getHours();
-
-  if (hour < 12) return "morning — what are you looking at?";
-  if (hour < 18) return "what are you thinking about right now?";
-  return "what are you looking to get into tonight?";
 }
 
 // ===== ROUTE =====
@@ -117,13 +127,13 @@ router.post("/", async (req, res) => {
 
   try {
 
-    // ===== GREETING =====
+    // GREETING
     if (/^hi|hello|hey$/.test(msg)) {
       await sendHumanMessage(from, getGreeting());
       return;
     }
 
-    // ===== UPDATE INTENT =====
+    // UPDATE INTENT
     updateIntent(msg, session);
 
     let deals = await getDeals();
@@ -131,18 +141,18 @@ router.post("/", async (req, res) => {
 
     deals.sort((a,b)=>a.monthly-b.monthly);
 
-    // ===== NO MATCH =====
+    // NO RESULTS
     if (!deals.length) {
-      await sendHumanMessage(from,"nothing clean on that exact setup — want me to open it up a bit?");
+      await sendHumanMessage(from,"nothing clean exactly like that — want me to open it up a bit?");
       return;
     }
 
-    // ===== SHOW DEALS =====
+    // SHOW DEALS
     const top = deals.slice(0,3);
 
     let reply = top.map(formatDeal).join("\n\n");
 
-    reply += `\n\nthis first one is the cleanest setup right now`;
+    reply += `\n\n${getCloserLine()}`;
 
     session.activeDeal = top[0];
 
