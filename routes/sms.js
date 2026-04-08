@@ -11,214 +11,187 @@ const {
   isShoppingIntent
 } = require("../utils/detectors");
 
-// 🧠 FIND DEAL FROM MESSAGE
-function findMentionedDeal(msg, deals) {
+// 🧠 FIND DEAL
+function findDeal(msg, deals) {
   if (!deals) return null;
 
   msg = msg.toLowerCase();
 
   return deals.find(d => {
-    const full = `${d.make} ${d.model}`.toLowerCase();
-    return msg.includes(d.model.toLowerCase()) || msg.includes(full);
+    const name = `${d.make} ${d.model}`.toLowerCase();
+    return name.includes(msg) || msg.includes(d.model.toLowerCase());
   });
 }
 
-// 🧠 DETECT STYLE
-function detectStyle(msg) {
-  if (msg.length < 15) return "short";
-  if (msg.length > 40) return "detailed";
-  return "normal";
+// 🧠 FORMAT DEAL (CLEAN LINE)
+function formatDeal(d) {
+  return `${d.make} ${d.model} - $${d.monthly}/mo (${d.term}mo / ${d.miles})`;
 }
 
-// 🧠 PICK BEST DEALS
-function pickBestDeals(deals) {
+// 🧠 PICK BEST
+function pickBest(deals) {
   return [...deals].sort((a, b) => a.monthly - b.monthly).slice(0, 2);
 }
 
 router.post("/", async (req, res) => {
-  res.sendStatus(200); // 🔥 instant response (prevents duplicates)
+  res.sendStatus(200);
 
   const from = req.body.number;
+  const raw = req.body.content || "";
 
-  // 🧠 HANDLE MULTI MESSAGE
-  let raw = req.body.content || "";
-
-  const parts = raw.split("\n").map(p => p.trim()).filter(Boolean);
-  const msg = parts.length ? parts[parts.length - 1].toLowerCase() : "";
+  const msg = raw.split("\n").pop().trim().toLowerCase();
 
   const session = getSession(from);
 
   try {
     // 🔥 RESET
-    if (/start over|reset|restart/.test(raw.toLowerCase())) {
+    if (/start over|reset/.test(raw.toLowerCase())) {
       Object.keys(session).forEach(k => delete session[k]);
 
-      await sendHumanMessage(from, "starting fresh, what are you looking at?");
+      await sendHumanMessage(from,
+        "hey, just so i point you the right way—what are you thinking about?"
+      );
       return;
     }
 
-    // 🔥 GREETING (only first time)
-    if (isGreeting(msg) && !session.started && !session.lastDeals) {
+    // 🔥 GREETING (HUMAN)
+    if (isGreeting(msg) && !session.started) {
       session.started = true;
 
-      await sendHumanMessage(from, "hey, what are you looking to get into?");
-      return;
-    }
-
-    // 🧠 STYLE
-    const style = detectStyle(msg);
-
-    // 🧠 REFINEMENT (🔥 THIS FIXES YOUR MAIN ISSUE)
-    if (/different|something else|more luxury|luxury|nicer|upgrade|better/.test(msg)) {
-
-      session.luxury = true;
-
-      // bump budget if too low
-      if (!session.budget || session.budget < 500) {
-        session.budget = 700;
-      }
-
-      const deals = await getDeals(session);
-
-      if (!deals.length) {
-        await sendHumanMessage(from, "nothing solid there, want me to stretch it a bit?");
-        return;
-      }
-
-      const [primary, secondary] = pickBestDeals(deals);
-
-      await sendHumanMessage(
-        from,
-        `${primary.make} ${primary.model} - $${primary.monthly}/mo
-${secondary ? `${secondary.make} ${secondary.model} - $${secondary.monthly}/mo\n` : ""}
-
-these are going to feel a lot more premium
-
-if it were me i'd go with the ${primary.make} ${primary.model}
-
-want me to dial this in or get aggressive on pricing?`
+      await sendHumanMessage(from,
+        "hey, what are you thinking about getting into?"
       );
-
       return;
-    }
-
-    // 🧠 NEW SEARCH RESET
-    if (/under|budget|monthly|deal|options/.test(msg)) {
-      delete session.activeDeal;
     }
 
     // 🧠 STORE FILTERS
     const budget = extractBudget(msg);
     const brand = detectBrand(msg);
 
-    if (budget) {
-      session.budget = budget;
-      delete session.lastDeals;
-      delete session.activeDeal;
-    }
-
+    if (budget) session.budget = budget;
     if (brand) session.brand = brand;
 
-    // 📊 GET DEALS
+    // 🧠 GET DEALS
     const deals = await getDeals(session);
 
     if (deals.length) session.lastDeals = deals;
 
-    // 🧠 DEAL SELECTION
-    const mentionedDeal = findMentionedDeal(msg, session.lastDeals);
+    // 🧠 BRAND REQUEST (BMW, etc)
+    if (brand && deals.length) {
+      const best = pickBest(deals);
 
-    if (mentionedDeal) {
-      session.activeDeal = mentionedDeal;
+      const list = best.map(formatDeal).join("\n");
 
-      await sendHumanMessage(
-        from,
-        style === "short"
-          ? `${mentionedDeal.make} ${mentionedDeal.model}\nwant numbers?`
-          : `got it, ${mentionedDeal.make} ${mentionedDeal.model}\n\nwant me to break it down?`
+      await sendHumanMessage(from,
+        `${list}
+
+these are the cleanest ${brand.toUpperCase()} deals right now
+
+want me to dial one in for you?`
       );
       return;
     }
 
-    // 🧠 DUE QUESTION
-    if (/due|down/.test(msg)) {
+    // 🧠 SPECIFIC CAR
+    const selected = findDeal(msg, session.lastDeals);
+
+    if (selected) {
+      session.activeDeal = selected;
+
+      await sendHumanMessage(from,
+        `${selected.make} ${selected.model}
+
+want the full breakdown on this one?`
+      );
+      return;
+    }
+
+    // 🧠 TERMS / MILES / DUE
+    if (/term|months|miles|due|down/.test(msg)) {
+
       if (!session.activeDeal) {
-        await sendHumanMessage(
-          from,
+        await sendHumanMessage(from,
           "which one are you looking at?"
         );
         return;
       }
 
-      await sendHumanMessage(
-        from,
-        `${session.activeDeal.make} ${session.activeDeal.model}\ndue is ${session.activeDeal.due}`
+      const d = session.activeDeal;
+
+      await sendHumanMessage(from,
+        `${d.make} ${d.model}
+${d.term} months
+${d.miles} miles/year
+${d.due} due at signing`
       );
       return;
     }
 
-    // 🧠 DEAL RESPONSE (CORE SELLING LOGIC)
+    // 🧠 REFINEMENT (LUXURY)
+    if (/luxury|nicer|better|upgrade/.test(msg)) {
+
+      session.budget = Math.max(session.budget || 0, 600);
+
+      const newDeals = await getDeals(session);
+      const best = pickBest(newDeals);
+
+      const list = best.map(formatDeal).join("\n");
+
+      await sendHumanMessage(from,
+        `${list}
+
+these will feel a lot more premium
+
+i’d lean toward the ${best[0].make} ${best[0].model}
+
+want me to structure it clean?`
+      );
+      return;
+    }
+
+    // 🧠 MAIN SEARCH
     if (isShoppingIntent(msg) && deals.length) {
 
-      const [primary, secondary] = pickBestDeals(deals);
+      const best = pickBest(deals);
+      const list = best.map(formatDeal).join("\n");
 
-      let response = "";
+      await sendHumanMessage(from,
+        `${list}
 
-      if (style === "short") {
-        response = `${primary.make} ${primary.model} $${primary.monthly}`;
-        if (secondary) response += `\n${secondary.make} ${secondary.model} $${secondary.monthly}`;
-        response += `\nthis is the move\nwant it?`;
-      } else {
-        response = `${primary.make} ${primary.model} - $${primary.monthly}/mo`;
-        if (secondary) response += `\n${secondary.make} ${secondary.model} - $${secondary.monthly}/mo`;
+this is what actually makes the most sense right now
 
-        response += `\n\nthis is what actually makes the most sense`;
-        response += `\n\nif it were me i'd go with the ${primary.make} ${primary.model}`;
-        response += `\n\nwant me to lock something in or tweak it?`;
-      }
+i’d go with the ${best[0].make} ${best[0].model}
 
-      await sendHumanMessage(from, response);
+want me to lock something in or tweak it?`
+      );
       return;
     }
 
     // 🧠 SHOW MORE
-    if (/more|full list|all/.test(msg)) {
-      const chunk = session.lastDeals?.slice(0, 10) || [];
+    if (/more|all|list/.test(msg)) {
 
-      const list = chunk.map(d =>
-        `${d.make} ${d.model} $${d.monthly}`
-      ).join("\n");
+      const chunk = session.lastDeals?.slice(0, 10) || [];
+      const list = chunk.map(formatDeal).join("\n");
 
       await sendHumanMessage(from, list);
       return;
     }
 
     // 🧠 CLOSE
-    if (/yes|yeah|ok|do it/.test(msg)) {
-      await sendHumanMessage(
-        from,
-        "perfect, i'll lock it in\n\nwant the app?"
+    if (/yes|ok|do it/.test(msg)) {
+      await sendHumanMessage(from,
+        "perfect, i’ll get this going\n\nhttps://onyxautocollection.com/1745-2/"
       );
       return;
     }
 
-    if (/app|apply/.test(msg)) {
-      await sendHumanMessage(
-        from,
-        "https://onyxautocollection.com/1745-2/"
-      );
-      return;
-    }
-
-    // 🧠 FALLBACK
-    await sendHumanMessage(
-      from,
-      style === "short"
-        ? "what are you thinking?"
-        : "what kind of car are you looking for?"
+    // 🧠 FALLBACK (NO LOOPING)
+    await sendHumanMessage(from,
+      "got you—what kind of car are you leaning toward?"
     );
 
   } catch (err) {
-    console.error("❌ SMS ERROR:", err);
+    console.error("❌ ERROR:", err);
   }
 });
 
