@@ -4,28 +4,23 @@ const router = express.Router();
 const { sendHumanMessage } = require("../services/messaging");
 const { getDeals } = require("../services/deals");
 const { getSession } = require("../utils/memory");
-const {
-  extractBudget,
-  detectBrand,
-  isGreeting,
-  isShoppingIntent
-} = require("../utils/detectors");
 
-// 🧠 FIND DEAL
-function findDeal(msg, deals) {
-  if (!deals) return null;
+// 🧠 PAYMENT RULES
+const leaseAdjust = {
+  13: 77,
+  18: 56,
+  24: 42,
+  36: 28,
+  39: 26,
+  48: 21
+};
 
-  msg = msg.toLowerCase();
-
-  return deals.find(d => {
-    const name = `${d.make} ${d.model}`.toLowerCase();
-    return name.includes(msg) || msg.includes(d.model.toLowerCase());
-  });
-}
-
-// 🧠 FORMAT DEAL (CLEAN LINE)
+// 🧠 FORMAT DEAL
 function formatDeal(d) {
-  return `${d.make} ${d.model} - $${d.monthly}/mo (${d.term}mo / ${d.miles})`;
+  return `${d.make} ${d.model}
+$${d.monthly}/mo
+${d.term} mo / ${d.miles}
+${d.due} due`;
 }
 
 // 🧠 PICK BEST
@@ -33,161 +28,186 @@ function pickBest(deals) {
   return [...deals].sort((a, b) => a.monthly - b.monthly).slice(0, 2);
 }
 
+// 🧠 FIND DEAL
+function findDeal(msg, deals) {
+  if (!deals) return null;
+
+  msg = msg.toLowerCase();
+
+  return deals.find(d =>
+    msg.includes(d.model.toLowerCase()) ||
+    msg.includes(`${d.make} ${d.model}`.toLowerCase())
+  );
+}
+
+// 🧠 PARSE MONEY
+function extractMoney(msg) {
+  const match = msg.match(/\$?(\d{3,5})/);
+  return match ? Number(match[1]) : null;
+}
+
+// 🧠 CALCULATE PAYMENT
+function adjustPayment(deal, newDown) {
+  const currentDown = Number(deal.due.replace(/[^0-9]/g, ""));
+  const diff = newDown - currentDown;
+
+  const factor = leaseAdjust[deal.term] || 30;
+
+  const delta = Math.round((diff / 1000) * factor);
+
+  return deal.monthly - delta;
+}
+
 router.post("/", async (req, res) => {
   res.sendStatus(200);
 
   const from = req.body.number;
   const raw = req.body.content || "";
-
   const msg = raw.split("\n").pop().trim().toLowerCase();
 
   const session = getSession(from);
 
   try {
-    // 🔥 RESET
-    if (/start over|reset/.test(raw.toLowerCase())) {
+    // RESET
+    if (/start over|reset/.test(msg)) {
       Object.keys(session).forEach(k => delete session[k]);
 
       await sendHumanMessage(from,
-        "hey, just so i point you the right way—what are you thinking about?"
+        "let’s reset—what are you thinking about getting into?"
       );
       return;
     }
 
-    // 🔥 GREETING (HUMAN)
-    if (isGreeting(msg) && !session.started) {
+    // GREETING
+    if (/^hi|hello|hey$/.test(msg) && !session.started) {
       session.started = true;
 
       await sendHumanMessage(from,
-        "hey, what are you thinking about getting into?"
+        "hey—what are you looking to get into?"
       );
       return;
     }
 
-    // 🧠 STORE FILTERS
-    const budget = extractBudget(msg);
-    const brand = detectBrand(msg);
+    // BUDGET
+    const budget = extractMoney(msg);
+    if (budget && msg.includes("month")) {
+      session.budget = budget;
+    }
 
-    if (budget) session.budget = budget;
-    if (brand) session.brand = brand;
-
-    // 🧠 GET DEALS
+    // GET DEALS
     const deals = await getDeals(session);
-
     if (deals.length) session.lastDeals = deals;
 
-    // 🧠 BRAND REQUEST (BMW, etc)
-    if (brand && deals.length) {
-      const best = pickBest(deals);
-
-      const list = best.map(formatDeal).join("\n");
-
-      await sendHumanMessage(from,
-        `${list}
-
-these are the cleanest ${brand.toUpperCase()} deals right now
-
-want me to dial one in for you?`
-      );
-      return;
-    }
-
-    // 🧠 SPECIFIC CAR
+    // SELECT CAR
     const selected = findDeal(msg, session.lastDeals);
-
     if (selected) {
       session.activeDeal = selected;
 
       await sendHumanMessage(from,
         `${selected.make} ${selected.model}
 
-want the full breakdown on this one?`
+clean deal—want numbers broken down?`
       );
       return;
     }
 
-    // 🧠 TERMS / MILES / DUE
-    if (/term|months|miles|due|down/.test(msg)) {
+    // NEGOTIATION (DOWN PAYMENT)
+    if (/down|due/.test(msg)) {
 
       if (!session.activeDeal) {
+        await sendHumanMessage(from, "which car?");
+        return;
+      }
+
+      const newDown = extractMoney(msg);
+
+      if (!newDown && /0/.test(msg)) {
+        const newPayment = adjustPayment(session.activeDeal, 0);
+
         await sendHumanMessage(from,
-          "which one are you looking at?"
+          `${session.activeDeal.make} ${session.activeDeal.model}
+
+0 down lands around $${newPayment}/mo`
         );
         return;
       }
 
+      if (newDown) {
+        const newPayment = adjustPayment(session.activeDeal, newDown);
+
+        await sendHumanMessage(from,
+          `${session.activeDeal.make} ${session.activeDeal.model}
+
+with $${newDown} down you're around $${newPayment}/mo`
+        );
+        return;
+      }
+
+      // default info
       const d = session.activeDeal;
 
       await sendHumanMessage(from,
         `${d.make} ${d.model}
-${d.term} months
-${d.miles} miles/year
-${d.due} due at signing`
+${d.term} mo
+${d.miles} miles
+${d.due} due`
       );
+
       return;
     }
 
-    // 🧠 REFINEMENT (LUXURY)
-    if (/luxury|nicer|better|upgrade/.test(msg)) {
+    // LOWER PAYMENT INTENT
+    if (/lower|cheaper/.test(msg)) {
 
-      session.budget = Math.max(session.budget || 0, 600);
+      if (!session.activeDeal) return;
 
-      const newDeals = await getDeals(session);
-      const best = pickBest(newDeals);
+      const d = session.activeDeal;
 
-      const list = best.map(formatDeal).join("\n");
+      const newPayment = adjustPayment(d, 4000);
 
       await sendHumanMessage(from,
-        `${list}
-
-these will feel a lot more premium
-
-i’d lean toward the ${best[0].make} ${best[0].model}
+        `we can get that down to about $${newPayment}/mo with around $4k down
 
 want me to structure it clean?`
       );
+
       return;
     }
 
-    // 🧠 MAIN SEARCH
-    if (isShoppingIntent(msg) && deals.length) {
+    // MAIN SEARCH
+    if (/under|month|deal|options/.test(msg)) {
 
       const best = pickBest(deals);
-      const list = best.map(formatDeal).join("\n");
 
       await sendHumanMessage(from,
-        `${list}
-
-this is what actually makes the most sense right now
-
-i’d go with the ${best[0].make} ${best[0].model}
-
-want me to lock something in or tweak it?`
+        best.map(formatDeal).join("\n\n")
       );
+
       return;
     }
 
-    // 🧠 SHOW MORE
-    if (/more|all|list/.test(msg)) {
+    // SHOW MORE
+    if (/more|all/.test(msg)) {
+      const chunk = session.lastDeals?.slice(0, 8) || [];
 
-      const chunk = session.lastDeals?.slice(0, 10) || [];
-      const list = chunk.map(formatDeal).join("\n");
+      await sendHumanMessage(from,
+        chunk.map(formatDeal).join("\n\n")
+      );
 
-      await sendHumanMessage(from, list);
       return;
     }
 
-    // 🧠 CLOSE
+    // CLOSE
     if (/yes|ok|do it/.test(msg)) {
       await sendHumanMessage(from,
-        "perfect, i’ll get this going\n\nhttps://onyxautocollection.com/1745-2/"
+        "perfect—i’ll get this going\n\nhttps://onyxautocollection.com/1745-2/"
       );
       return;
     }
 
-    // 🧠 FALLBACK (NO LOOPING)
+    // DEFAULT
     await sendHumanMessage(from,
-      "got you—what kind of car are you leaning toward?"
+      "what kind of car are you leaning toward?"
     );
 
   } catch (err) {
