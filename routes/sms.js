@@ -23,88 +23,28 @@ function findMentionedDeal(msg, deals) {
   });
 }
 
-// 🧠 DETECT BUYER TYPE
-function detectBuyerType(msg, session) {
-  const luxuryBrands = ["bmw", "mercedes", "audi", "lexus", "porsche"];
-
-  if (luxuryBrands.some(b => msg.includes(b))) return "luxury";
-
-  if (session.budget && session.budget <= 400) return "budget";
-  if (session.budget && session.budget >= 700) return "luxury";
-
-  return "standard";
-}
-
-// 🧠 DETECT PERSONALITY
+// 🧠 DETECT STYLE
 function detectStyle(msg) {
   if (msg.length < 15) return "short";
-  if (msg.includes("?") && msg.length > 25) return "curious";
   if (msg.length > 40) return "detailed";
   return "normal";
 }
 
-// 🧠 BUILD RESPONSE BASED ON STYLE
-function buildResponse({ primary, secondary, buyerType, style }) {
-
-  const short = style === "short";
-
-  let res = "";
-
-  // DEALS
-  if (short) {
-    res += `${primary.make} ${primary.model} $${primary.monthly}`;
-    if (secondary) {
-      res += `\n${secondary.make} ${secondary.model} $${secondary.monthly}`;
-    }
-  } else {
-    res += `${primary.make} ${primary.model} - $${primary.monthly}/mo`;
-    if (secondary) {
-      res += `\n${secondary.make} ${secondary.model} - $${secondary.monthly}/mo`;
-    }
-  }
-
-  // TONE
-  if (buyerType === "luxury") {
-    res += short
-      ? `\nbest option rn`
-      : `\n\nthese are the cleanest options right now\nif it were me i'd go with the ${primary.make} ${primary.model}`;
-  }
-
-  else if (buyerType === "budget") {
-    res += short
-      ? `\nbest value`
-      : `\n\nthese are the strongest value deals right now\n${primary.make} ${primary.model} is the best bang for your money`;
-  }
-
-  else {
-    res += short
-      ? `\nthis is the move`
-      : `\n\nthis is what actually makes the most sense\nif it were me i'd go with the ${primary.make} ${primary.model}`;
-  }
-
-  // CLOSE
-  res += short
-    ? `\nwant it?`
-    : `\n\ndoes that feel right or want something different?`;
-
-  return res;
+// 🧠 PICK BEST DEALS
+function pickBestDeals(deals) {
+  return [...deals].sort((a, b) => a.monthly - b.monthly).slice(0, 2);
 }
 
 router.post("/", async (req, res) => {
-  res.sendStatus(200); // 🔥 instant webhook response
+  res.sendStatus(200); // 🔥 instant response (prevents duplicates)
 
   const from = req.body.number;
 
+  // 🧠 HANDLE MULTI MESSAGE
   let raw = req.body.content || "";
 
-  const parts = raw
-    .split("\n")
-    .map(p => p.trim())
-    .filter(Boolean);
-
-  const msg = parts.length
-    ? parts[parts.length - 1].toLowerCase()
-    : "";
+  const parts = raw.split("\n").map(p => p.trim()).filter(Boolean);
+  const msg = parts.length ? parts[parts.length - 1].toLowerCase() : "";
 
   const session = getSession(from);
 
@@ -117,11 +57,48 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    // 🔥 GREETING
-    if (isGreeting(msg) && !session.started) {
+    // 🔥 GREETING (only first time)
+    if (isGreeting(msg) && !session.started && !session.lastDeals) {
       session.started = true;
 
       await sendHumanMessage(from, "hey, what are you looking to get into?");
+      return;
+    }
+
+    // 🧠 STYLE
+    const style = detectStyle(msg);
+
+    // 🧠 REFINEMENT (🔥 THIS FIXES YOUR MAIN ISSUE)
+    if (/different|something else|more luxury|luxury|nicer|upgrade|better/.test(msg)) {
+
+      session.luxury = true;
+
+      // bump budget if too low
+      if (!session.budget || session.budget < 500) {
+        session.budget = 700;
+      }
+
+      const deals = await getDeals(session);
+
+      if (!deals.length) {
+        await sendHumanMessage(from, "nothing solid there, want me to stretch it a bit?");
+        return;
+      }
+
+      const [primary, secondary] = pickBestDeals(deals);
+
+      await sendHumanMessage(
+        from,
+        `${primary.make} ${primary.model} - $${primary.monthly}/mo
+${secondary ? `${secondary.make} ${secondary.model} - $${secondary.monthly}/mo\n` : ""}
+
+these are going to feel a lot more premium
+
+if it were me i'd go with the ${primary.make} ${primary.model}
+
+want me to dial this in or get aggressive on pricing?`
+      );
+
       return;
     }
 
@@ -147,31 +124,27 @@ router.post("/", async (req, res) => {
 
     if (deals.length) session.lastDeals = deals;
 
-    // 🧠 STYLE + BUYER TYPE
-    const style = detectStyle(msg);
-    const buyerType = detectBuyerType(msg, session);
-
-    // 🧠 CAR MATCH
+    // 🧠 DEAL SELECTION
     const mentionedDeal = findMentionedDeal(msg, session.lastDeals);
 
     if (mentionedDeal) {
       session.activeDeal = mentionedDeal;
 
-      const reply = style === "short"
-        ? `${mentionedDeal.make} ${mentionedDeal.model}\nwant numbers?`
-        : `got it, you're looking at the ${mentionedDeal.make} ${mentionedDeal.model}\n\nwant me to break down numbers on it?`;
-
-      await sendHumanMessage(from, reply);
+      await sendHumanMessage(
+        from,
+        style === "short"
+          ? `${mentionedDeal.make} ${mentionedDeal.model}\nwant numbers?`
+          : `got it, ${mentionedDeal.make} ${mentionedDeal.model}\n\nwant me to break it down?`
+      );
       return;
     }
 
     // 🧠 DUE QUESTION
     if (/due|down/.test(msg)) {
       if (!session.activeDeal) {
-        await sendHumanMessage(from,
-          style === "short"
-            ? "which one?"
-            : "which one are you looking at? i’ll break it down for you"
+        await sendHumanMessage(
+          from,
+          "which one are you looking at?"
         );
         return;
       }
@@ -183,40 +156,32 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    // 🧠 ZERO DOWN
-    if (/0 down|zero down/.test(msg)) {
-      const deal = session.activeDeal || session.lastDeals?.[0];
-      if (!deal) return;
-
-      const down = Number(deal.due.replace(/[^0-9]/g, ""));
-      const newPayment = deal.monthly + Math.round(down / 36);
-
-      await sendHumanMessage(
-        from,
-        `${deal.make} ${deal.model}\n0 down ~ $${newPayment}/mo`
-      );
-      return;
-    }
-
-    // 🧠 DEAL RESPONSE (ELITE + ADAPTIVE)
+    // 🧠 DEAL RESPONSE (CORE SELLING LOGIC)
     if (isShoppingIntent(msg) && deals.length) {
-      const sorted = [...deals].sort((a, b) => a.monthly - b.monthly);
-      const primary = sorted[0];
-      const secondary = sorted[1];
 
-      const reply = buildResponse({
-        primary,
-        secondary,
-        buyerType,
-        style
-      });
+      const [primary, secondary] = pickBestDeals(deals);
 
-      await sendHumanMessage(from, reply);
+      let response = "";
+
+      if (style === "short") {
+        response = `${primary.make} ${primary.model} $${primary.monthly}`;
+        if (secondary) response += `\n${secondary.make} ${secondary.model} $${secondary.monthly}`;
+        response += `\nthis is the move\nwant it?`;
+      } else {
+        response = `${primary.make} ${primary.model} - $${primary.monthly}/mo`;
+        if (secondary) response += `\n${secondary.make} ${secondary.model} - $${secondary.monthly}/mo`;
+
+        response += `\n\nthis is what actually makes the most sense`;
+        response += `\n\nif it were me i'd go with the ${primary.make} ${primary.model}`;
+        response += `\n\nwant me to lock something in or tweak it?`;
+      }
+
+      await sendHumanMessage(from, response);
       return;
     }
 
     // 🧠 SHOW MORE
-    if (/full list|all|more/.test(msg)) {
+    if (/more|full list|all/.test(msg)) {
       const chunk = session.lastDeals?.slice(0, 10) || [];
 
       const list = chunk.map(d =>
@@ -228,10 +193,10 @@ router.post("/", async (req, res) => {
     }
 
     // 🧠 CLOSE
-    if (/yes|yeah|ok/.test(msg)) {
+    if (/yes|yeah|ok|do it/.test(msg)) {
       await sendHumanMessage(
         from,
-        "perfect, i’ll lock it in\n\nwant the app?"
+        "perfect, i'll lock it in\n\nwant the app?"
       );
       return;
     }
