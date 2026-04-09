@@ -38,6 +38,37 @@ function calculatePayment(deal, targetDown) {
 }
 
 /* =========================
+   DETECT PAYMENT QUERY
+   Catches "what's the payment on the X5?" or "how much is the BMW?"
+   Returns the deal being asked about, or null if not a payment question
+========================= */
+function detectPaymentQuery(msg, deals, activeDeal) {
+  const text = msg.toLowerCase();
+
+  // Must look like a payment question
+  const isPaymentQuestion = /payment|how much|what.*cost|monthly|per month|lease.*on|price.*on|how much.*on|what.*on/i.test(text);
+  if (!isPaymentQuestion) return null;
+
+  // Try to find a specific deal mentioned in the message
+  if (deals && deals.length) {
+    const mentioned = deals.find(d =>
+      d.model && text.includes(d.model.toLowerCase())
+    );
+    if (mentioned) return mentioned;
+
+    const mentionedMake = deals.find(d =>
+      d.make && text.includes(d.make.toLowerCase())
+    );
+    if (mentionedMake) return mentionedMake;
+  }
+
+  // Fall back to active deal if no specific car mentioned
+  if (activeDeal) return activeDeal;
+
+  return null;
+}
+
+/* =========================
    DETECT PAYMENT ADJUSTMENT REQUEST
    Returns target down payment if client is asking to adjust, otherwise null
 ========================= */
@@ -140,10 +171,13 @@ NEVER repeatedly push alternatives when a client has clearly said what they want
 
 ## CALCULATED PAYMENT SCENARIO
 ${paymentScenario ? `
+Vehicle: ${paymentScenario.deal ? paymentScenario.deal.make + " " + paymentScenario.deal.model : "active deal"}
 Client requested: ${paymentScenario.request}
-CALCULATED RESULT → $${paymentScenario.newMonthly}/mo with $${paymentScenario.newDue} due at signing (monthly ${paymentScenario.direction}s by $${paymentScenario.adjustment}/mo)
-Quote these exact numbers confidently. If the target monthly is unrealistically low, say so and offer a middle ground with actual numbers.
-` : "No adjustment requested yet — quote inventory numbers as-is."}
+RESULT → $${paymentScenario.newMonthly}/mo | $${paymentScenario.newDue} due at signing | ${paymentScenario.deal ? paymentScenario.deal.term : ""}mo / ${paymentScenario.deal ? paymentScenario.deal.miles : ""}
+${paymentScenario.adjustment > 0 ? `(monthly ${paymentScenario.direction}s by $${paymentScenario.adjustment}/mo vs base)` : ""}
+Quote ONLY these exact numbers. Do not use the inventory list numbers if a scenario is present.
+If a target monthly is unrealistically low (requires more than $10k down), say so and offer a realistic middle ground with actual calculated numbers.
+` : "No payment scenario — quote numbers directly from inventory list."}
 
 ## COLLECTING CLIENT INFO
 As the conversation progresses, extract and remember:
@@ -471,38 +505,67 @@ router.post("/", async (req, res) => {
       session.messages = session.messages.slice(-20);
     }
 
-    /* ─── PAYMENT ADJUSTMENT DETECTION ─────────────── */
+    /* ─── PAYMENT QUERY + ADJUSTMENT DETECTION ─────── */
     let paymentScenario = null;
-    const adjustment = detectPaymentAdjustment(msg, session.activeDeal);
 
-    if (adjustment && session.activeDeal) {
-      if (adjustment.type === "target_monthly") {
-        // Client said "bring it to $348/mo" — we calculated the required down
-        const calc = calculatePayment(session.activeDeal, adjustment.targetDown);
-        if (calc) {
-          paymentScenario = {
-            request:    `$${adjustment.targetMonthly}/mo target`,
-            ...calc
-          };
+    // Step 1 — figure out which deal we're calculating for
+    // Could be a simple "what's the payment?" or an adjustment request
+    const queriedDeal = detectPaymentQuery(msg, currentDeals, session.activeDeal);
+    const dealForCalc = queriedDeal || session.activeDeal;
+
+    // Step 2 — check if they also want to adjust the numbers
+    const adjustment = detectPaymentAdjustment(msg, dealForCalc);
+
+    if (dealForCalc) {
+      const baseDue     = parseFloat(String(dealForCalc.due).replace(/[^0-9.]/g, "")) || 0;
+      const baseMonthly = parseFloat(String(dealForCalc.monthly).replace(/[^0-9.]/g, "")) || 0;
+      const term        = parseInt(dealForCalc.term) || 36;
+
+      if (adjustment) {
+        // Client wants to adjust — calculate the new numbers
+        if (adjustment.type === "target_monthly") {
+          const calc = calculatePayment(dealForCalc, adjustment.targetDown);
+          if (calc) {
+            paymentScenario = {
+              deal:    dealForCalc,
+              request: `$${adjustment.targetMonthly}/mo target`,
+              ...calc
+            };
+          }
+        } else if (adjustment.type === "target_down") {
+          const calc = calculatePayment(dealForCalc, adjustment.targetDown);
+          if (calc) {
+            paymentScenario = {
+              deal:    dealForCalc,
+              request: `$${adjustment.targetDown} down`,
+              ...calc
+            };
+          }
+        } else if (adjustment.type === "vague") {
+          // Show what $1,000 extra down does as a concrete example
+          const calc = calculatePayment(dealForCalc, baseDue + 1000);
+          if (calc) {
+            paymentScenario = {
+              deal:    dealForCalc,
+              request: "lower monthly (example: $1,000 more down)",
+              ...calc
+            };
+          }
         }
-      } else if (adjustment.type === "target_down") {
-        // Client said "I'll put $5,000 down"
-        const calc = calculatePayment(session.activeDeal, adjustment.targetDown);
-        if (calc) {
-          paymentScenario = {
-            request:    `$${adjustment.targetDown} down`,
-            ...calc
-          };
-        }
-      } else if (adjustment.type === "vague") {
-        // "lower the payment" — show what $500 extra down would do as an example
-        const baseDue = parseFloat(String(session.activeDeal.due).replace(/[^0-9.]/g, "")) || 0;
-        const calc    = calculatePayment(session.activeDeal, baseDue + 500);
-        if (calc) {
-          paymentScenario = {
-            request:    "lower monthly (example: $500 more down)",
-            ...calc
-          };
+      } else if (queriedDeal) {
+        // Simple payment question — return base numbers from the sheet
+        paymentScenario = {
+          deal:       dealForCalc,
+          request:    "payment quote",
+          newMonthly: Math.round(baseMonthly),
+          newDue:     Math.round(baseDue),
+          adjustment: 0,
+          direction:  "none"
+        };
+        // Lock this as the active deal since they asked about it specifically
+        if (!session.activeDeal || session.activeDeal.model !== dealForCalc.model) {
+          session.activeDeal = dealForCalc;
+          session.stage = "presenting";
         }
       }
     }
