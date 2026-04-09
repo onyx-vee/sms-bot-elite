@@ -110,10 +110,25 @@ function detectPaymentAdjustment(msg, deal) {
 }
 
 /* =========================
+   LANGUAGE DETECTION
+   Armenian Unicode block: U+0530–U+058F
+   Checks if message contains Armenian characters and updates session language
+========================= */
+function detectLanguage(msg, session) {
+  const hasArmenian = /[԰-֏ﬓ-ﬗ]/.test(msg);
+  if (hasArmenian) {
+    session.language = "armenian";
+  } else if (!session.language) {
+    session.language = "english";
+  }
+  return session.language;
+}
+
+/* =========================
    SYSTEM PROMPT BUILDER
    Called fresh each request so the AI always sees current deals + session state
 ========================= */
-function buildSystemPrompt(session, deals, paymentScenario = null) {
+function buildSystemPrompt(session, deals, paymentScenario = null, language = "english") {
   const activeDeal = session.activeDeal
     ? `${session.activeDeal.make} ${session.activeDeal.model} @ $${session.activeDeal.monthly}/mo`
     : "None set yet";
@@ -130,6 +145,11 @@ function buildSystemPrompt(session, deals, paymentScenario = null) {
   return `You are an elite auto broker texting real clients for Onyx Auto Collection, a luxury pre-owned and lease dealership in Los Angeles.
 
 Your name is never mentioned — you're just "the team." You text like a real human: concise, confident, no fluff.
+
+## LANGUAGE
+${language === "armenian"
+  ? "The client is texting in Armenian. You MUST respond entirely in Armenian for every message. All deal details (prices, terms, models) stay in their original format but all your words must be in Armenian."
+  : "Respond in English."}
 
 ## YOUR PERSONALITY
 - Direct, warm, and knowledgeable — like a trusted friend in the car business
@@ -486,6 +506,9 @@ router.post("/", async (req, res) => {
       session.clientName = detectedName;
     }
 
+    /* ─── DETECT LANGUAGE ───────────────────────────── */
+    const language = detectLanguage(msg, session);
+
     /* ─── FILTER DEALS (only on search intent) ──────── */
     if (hasSearchIntent(msg) || !session.lastShownDeals) {
       let filtered = basicFilter(allDeals, msg);
@@ -590,7 +613,7 @@ router.post("/", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: buildSystemPrompt(session, currentDeals, paymentScenario)
+          content: buildSystemPrompt(session, currentDeals, paymentScenario, language)
         },
         ...session.messages
       ],
