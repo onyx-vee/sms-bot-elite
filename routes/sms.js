@@ -49,10 +49,20 @@ Your name is never mentioned — you're just "the team." You text like a real hu
 ## CONVERSATION RULES
 - Only recommend 1–2 cars at a time — never dump the whole list
 - Once a car is selected (active deal), stay focused on it unless they ask to switch
-- If they ask about a car not in inventory, say you can source it and ask for their timeline
 - If they mention a budget, stick to it — don't show anything over their number
 - If they say "yes," "let's do it," or similar → send them the app link: ${APP_LINK}
 - If they're ready to move → collect: full name, email, zip code
+
+## HANDLING OUT-OF-INVENTORY REQUESTS (CRITICAL)
+If a client asks for a specific vehicle NOT in the inventory list:
+1. Acknowledge their request directly — "Got it, let me check on a QX60 for you"
+2. Tell them you'll have someone reach out shortly with availability
+3. Do NOT suggest alternatives unless they explicitly ask — respect their choice
+4. Do NOT pretend you can find it yourself — our team handles sourcing
+5. Include [SOURCE_REQUEST] tag so the team gets notified immediately
+6. Only mention alternatives AFTER confirming you're working on their request, and only if they seem open to it
+
+NEVER repeatedly push alternatives when a client has clearly said what they want. That kills deals.
 
 ## NEGOTIATION KNOWLEDGE
 - 36 month lease: ~$28 per $1,000 cap cost reduction
@@ -108,16 +118,32 @@ function basicFilter(deals, msg) {
   msg = msg.toLowerCase();
   let filtered = [...deals];
 
-  const makes = ["bmw", "mercedes", "audi", "lexus", "toyota", "honda", "porsche", "cadillac"];
+  // ── Brand filter ───────────────────────────────────────────────
+  const makes = [
+    "bmw", "mercedes", "audi", "lexus", "toyota", "honda",
+    "porsche", "cadillac", "infiniti", "acura", "volvo",
+    "genesis", "lincoln", "land rover", "jaguar", "maserati"
+  ];
   for (const make of makes) {
     if (msg.includes(make)) {
       filtered = filtered.filter(d => d.make.toLowerCase().includes(make));
     }
   }
 
+  // ── Direct model name match (most important) ───────────────────
+  // Check every deal to see if its model name appears in the message
+  // This catches "QX60", "Tahoe", "Wrangler", etc. without needing brand context
+  const modelMatched = filtered.filter(d =>
+    d.model && msg.includes(d.model.toLowerCase())
+  );
+  if (modelMatched.length > 0) {
+    return modelMatched; // hard match — return immediately, skip other filters
+  }
+
+  // ── Body style filter ──────────────────────────────────────────
   if (msg.includes("suv") || msg.includes("crossover")) {
     filtered = filtered.filter(d =>
-      /x1|x3|x5|x7|gla|glb|glc|gle|gls|rx|nx|ux|qx|cx|rav4|cr-v|tiguan|highlander|macan|cayenne|escalade/i.test(
+      /x1|x3|x5|x7|gla|glb|glc|gle|gls|rx|nx|ux|qx60|qx50|qx80|cx|rav4|cr-v|tiguan|highlander|macan|cayenne|escalade|rdx|mdx|xc60|xc90|gv80|navigator|defender/i.test(
         `${d.make} ${d.model}`
       )
     );
@@ -125,7 +151,7 @@ function basicFilter(deals, msg) {
 
   if (msg.includes("sedan")) {
     filtered = filtered.filter(d =>
-      /3 series|5 series|c-class|e-class|a4|a6|es|is|camry|accord|panamera|ct5/i.test(
+      /3 series|5 series|c-class|e-class|a4|a6|es|is|camry|accord|panamera|ct5|g70|g80|tlx/i.test(
         `${d.make} ${d.model}`
       )
     );
@@ -133,20 +159,20 @@ function basicFilter(deals, msg) {
 
   if (msg.includes("ev") || msg.includes("electric")) {
     filtered = filtered.filter(d =>
-      /ev|electric|ioniq|tesla|bolt|leaf|i4|i5|eq|e-tron/i.test(
+      /ev|electric|ioniq|tesla|bolt|leaf|i4|i5|eq|e-tron|lyriq|rivian/i.test(
         `${d.make} ${d.model}`
       )
     );
   }
 
-  // budget filter — numbers 3-4 digits are treated as monthly budget
+  // ── Budget filter ──────────────────────────────────────────────
   const budgetMatch = msg.match(/\$?(\d{3,4})\s*(\/mo|a month|per month|monthly)?/);
   if (budgetMatch) {
     const budget = parseInt(budgetMatch[1]);
     filtered = filtered.filter(d => d.monthly <= budget);
   }
 
-  // if filters eliminated everything, return full list (better than no results)
+  // if filters eliminated everything, return full unfiltered list
   return filtered.length > 0 ? filtered : deals;
 }
 
@@ -195,7 +221,16 @@ function resolveSelection(msg, deals) {
    Prevents re-filtering on follow-up messages like "tell me more"
 ========================= */
 function hasSearchIntent(msg) {
-  return /under|budget|payment|looking for|want|need|show me|what do you have|options|available|lease|buy|finance|suv|sedan|ev|electric|\$\d{3}/i.test(msg);
+  const intentKeywords = /under|budget|payment|looking for|want|need|show me|what do you have|options|available|lease|buy|finance|suv|sedan|coupe|ev|electric|\$\d{3}/i;
+  if (intentKeywords.test(msg)) return true;
+
+  // Also treat it as a search if the message looks like a car name:
+  // short (1-2 words), no question words, no conversational filler
+  const words = msg.trim().split(/\s+/);
+  const isShortAndClean = words.length <= 3 && !/\?|how|what|when|where|why|tell|more|that|this|just|okay|yes|no|thanks|done|got/.test(msg);
+  if (isShortAndClean) return true;
+
+  return false;
 }
 
 /* =========================
@@ -374,9 +409,10 @@ router.post("/", async (req, res) => {
     let reply = aiResponse.choices[0].message.content.trim();
 
     /* ─── HANDLE SPECIAL TAGS ───────────────────────── */
-    const shouldSaveLead  = reply.includes("[SAVE_LEAD]");
-    const shouldEscalate  = reply.includes("[ESCALATE]");
-    const shouldSetAppSent = reply.includes("[APP_SENT]");
+    const shouldSaveLead    = reply.includes("[SAVE_LEAD]");
+    const shouldEscalate    = reply.includes("[ESCALATE]");
+    const shouldSetAppSent  = reply.includes("[APP_SENT]");
+    const shouldSourceVehicle = reply.includes("[SOURCE_REQUEST]");
 
     // Extract budget tag e.g. [BUDGET:650]
     const budgetMatch = reply.match(/\[BUDGET:(\d+)\]/);
@@ -395,6 +431,7 @@ router.post("/", async (req, res) => {
       .replace(/\[SAVE_LEAD\]/g, "")
       .replace(/\[ESCALATE\]/g, "")
       .replace(/\[APP_SENT\]/g, "")
+      .replace(/\[SOURCE_REQUEST\]/g, "")
       .replace(/\[BUDGET:\d+\]/g, "")
       .replace(/\[ZIP:\d{5}\]/g, "")
       .trim();
@@ -406,6 +443,22 @@ router.post("/", async (req, res) => {
         session.leadSaved = true;
       } catch (e) {
         console.log("⚠️ Lead save failed:", e.message);
+      }
+    }
+
+    /* ─── SOURCE REQUEST ALERT ──────────────────────── */
+    if (shouldSourceVehicle && !session.sourceAlerted) {
+      session.sourceAlerted = true;
+      const clientLabel = session.clientName || from;
+      const budget = session.budget ? ` | Budget: ${session.budget}` : "";
+      const zip    = session.zip    ? ` | Zip: ${session.zip}`       : "";
+      try {
+        await sendHumanMessage(
+          `+1${OWNER_PHONE}`,
+          `🔍 Source request\nClient: ${clientLabel} (${from})\nVehicle: ${msg}${budget}${zip}\nNeeds follow-up on availability.`
+        );
+      } catch (e) {
+        console.log("⚠️ Source alert failed:", e.message);
       }
     }
 
