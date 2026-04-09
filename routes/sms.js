@@ -8,9 +8,7 @@ const { getSession } = require("../utils/memory");
 const OpenAI = require("openai");
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* =========================
-   BASIC FILTER (LIGHT ONLY)
-========================= */
+// ===== BASIC FILTER (LIGHT ONLY) =====
 function basicFilter(deals, msg) {
   msg = msg.toLowerCase();
 
@@ -52,69 +50,22 @@ function basicFilter(deals, msg) {
     deals = deals.filter(d => d.monthly <= budget);
   }
 
-  return deals.slice(0, 12);
+  return deals.slice(0, 12); // give AI options, not overload
 }
 
-/* =========================
-   ATTACH IDS (FOR SELECTION)
-========================= */
-function attachIds(deals) {
-  return deals.map((d, i) => ({
-    id: i + 1,
-    make: d.make,
-    model: d.model,
-    monthly: d.monthly,
-    due: d.due,
-    term: d.term,
-    miles: d.miles
-  }));
-}
-
-/* =========================
-   ROUTE
-========================= */
+// ===== ROUTE =====
 router.post("/", async (req, res) => {
   res.sendStatus(200);
 
   const from = req.body.number || req.body.from;
-  const msg = (req.body.content || req.body.text || "").trim().toLowerCase();
+  const msg = (req.body.content || req.body.text || "").trim();
 
   const session = getSession(from);
 
   try {
     const allDeals = await getDeals();
-    let filtered = basicFilter(allDeals, msg);
-    const dealsWithIds = attachIds(filtered);
+    const filteredDeals = basicFilter(allDeals, msg);
 
-    /* =========================
-       HANDLE "I LIKE 8"
-    ========================= */
-    const numMatch = msg.match(/\b\d+\b/);
-    if (numMatch) {
-      const selected = dealsWithIds.find(
-        d => d.id === parseInt(numMatch[0])
-      );
-
-      if (selected) {
-        session.activeDeal = selected;
-
-        await sendHumanMessage(
-          from,
-`${selected.make} ${selected.model}
-
-$${selected.monthly}/mo
-${selected.term} mo / ${selected.miles}
-$${selected.due} due
-
-want me to adjust the numbers or lock it in?`
-        );
-        return;
-      }
-    }
-
-    /* =========================
-       AI RESPONSE
-    ========================= */
     const ai = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -123,92 +74,83 @@ want me to adjust the numbers or lock it in?`
           content: `
 You are a high-end auto broker texting clients.
 
-You are NOT a chatbot. You text like a real person.
+You are NOT a chatbot. You are a real closer.
 
 ------------------------
-FORMAT RULES (STRICT)
+CORE RULES
 ------------------------
 
-When showing deals, ALWAYS format EXACTLY like this:
+1. NEVER reset conversation
+- Do NOT ask "what are you looking for" again
+- Continue naturally
 
-BMW X3 xDrive30
+2. TRACK ACTIVE DEAL
+- If user selects a car, that is the deal
+- All follow-ups refer to it unless changed
 
-$533/mo  
-39 mo / 7,500  
-$3,000 due
+3. NEVER INVENT DATA
+- Only use provided deals
+- If not found → say you'll source it
 
-(blank line)
+4. ANSWER DIRECTLY
+- If asked price with 0 down → calculate
+- DO NOT say "I’ll check"
 
-BMW X5 xDrive40i
+5. STAY RELEVANT
+- SUV → only SUVs
+- EV → only EVs
+- If none → say you'll source
 
-$866/mo  
-39 mo / 7,500  
-$3,000 due
+6. DO NOT SPAM LISTS
+- Recommend 1–2 options max
+- If asked for all → summarize cleanly
 
-------------------------
+7. CLOSING
+- If user says "lock it in":
+→ "perfect — fill this out and I’ll lock it in"
+→ include link: https://onyxautocollection.com/1745-2/
 
-NO:
-- no paragraphs
-- no explanations
-- no bullet points
-- no numbering
-- no bold text
-
-ONLY clean stacked deal format
-
-After listing deals, add ONE short line like:
-"this is probably the move"
-or
-"first one is the cleanest setup"
-
-------------------------
-BEHAVIOR
-------------------------
-
-- Keep responses SHORT
-- If user asks for deals → show deals ONLY
-- If user asks a question → answer directly
-
-- NEVER reset conversation
-- NEVER ask "what are you looking for" again
-
-- If user selects a car → stick to it
+8. TONE
+- Short
+- Confident
+- Smooth
+- No corporate talk
+- No bullet lists
+- No numbered lists
 
 ------------------------
-NEGOTIATION
+NEGOTIATION LOGIC
 ------------------------
 
 Use:
 
-36 mo → $28 per $1000  
-39 mo → $26 per $1000  
+13 mo → $77 per $1000  
+18 mo → $56  
+24 mo → $42  
+36 mo → $28  
+39 mo → $26  
+48 mo → $21  
 
-If user changes down payment:
-adjust monthly accordingly
-
-------------------------
-DATA RULES
-------------------------
-
-- ONLY use provided deals
-- NEVER invent pricing
-- If car not found → say you'll source it
+Adjust monthly based on down payment difference.
 
 ------------------------
-DEALS
+ACTIVE DEAL
 ------------------------
-${JSON.stringify(dealsWithIds, null, 2)}
-
-ACTIVE DEAL:
 ${JSON.stringify(session.activeDeal || null)}
+
+------------------------
+AVAILABLE DEALS
+------------------------
+${JSON.stringify(filteredDeals, null, 2)}
 
 ------------------------
 GOAL
 ------------------------
 
-Be sharp. Clean. Human.
-Close the deal naturally.
-`
+Guide the deal.
+Be sharp.
+Close when ready.
+          `
         },
         {
           role: "user",
@@ -219,10 +161,8 @@ Close the deal naturally.
 
     const reply = ai.choices[0].message.content;
 
-    /* =========================
-       AUTO SAVE ACTIVE DEAL
-    ========================= */
-    const match = dealsWithIds.find(d =>
+    // ===== SAVE ACTIVE DEAL (simple detection) =====
+    const match = filteredDeals.find(d =>
       reply.toLowerCase().includes(d.model.toLowerCase())
     );
 
