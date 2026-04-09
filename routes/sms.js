@@ -372,7 +372,9 @@ router.post("/", async (req, res) => {
   const from = req.body.number || req.body.from;
   const msg = (req.body.content || req.body.text || req.body.message || "").trim();
 
-  if (!from || !msg) return;
+  // Allow image-only messages through even if content/text is empty
+  const inboundMedia = req.body.media_url || req.body.mediaUrl || null;
+  if (!from || (!msg && !inboundMedia)) return;
 
   const session = getSession(from);
 
@@ -394,12 +396,13 @@ router.post("/", async (req, res) => {
     }
 
     /* ─── POST-APPLICATION: IMAGE HANDLING ──────────── */
-    // Sendblue delivers inbound images via media_url in the webhook body
-    const inboundMediaUrl = req.body.media_url || req.body.mediaUrl || null;
+    const inboundMediaUrl = inboundMedia; // resolved above in early-return guard
 
     if (inboundMediaUrl) {
-      const needsLicense   = session.stage === "awaiting_license"  && !session.licenseReceived;
-      const needsInsurance = session.stage === "awaiting_insurance" && !session.insuranceReceived;
+      // Accept images based on what's still missing, not just exact stage
+      // Sendblue can send image webhooks with empty text — don't block on stage
+      const needsLicense   = !session.licenseReceived;
+      const needsInsurance = session.licenseReceived && !session.insuranceReceived;
 
       if (needsLicense) {
         session.licenseReceived = true;
@@ -667,7 +670,6 @@ router.post("/", async (req, res) => {
       console.log(`📋 App link sent to ${from} — awaiting confirmation`);
 
       // Auto-save lead to Pipedrive the moment app link goes out
-      // This is the most reliable trigger — don't wait for AI to emit [SAVE_LEAD]
       if (!session.leadSaved) {
         try {
           await saveLead(session, from);
@@ -677,6 +679,22 @@ router.post("/", async (req, res) => {
           console.error(`❌ Pipedrive auto-save failed for ${from}:`, e.message);
         }
       }
+
+      // Follow-up nudge 2 minutes after sending the link
+      setTimeout(async () => {
+        try {
+          // Only send if they haven't already confirmed or moved forward
+          const current = getSession(from);
+          if (current.stage === "app_sent") {
+            await sendHumanMessage(
+              from,
+              "Hey just checking in — were you able to get the application submitted? Let me know if you need any help with it!"
+            );
+          }
+        } catch (e) {
+          console.log("⚠️ Follow-up nudge failed:", e.message);
+        }
+      }, 2 * 60 * 1000); // 2 minutes
     }
 
     /* ─── SEND REPLY & STORE IN HISTORY ─────────────── */

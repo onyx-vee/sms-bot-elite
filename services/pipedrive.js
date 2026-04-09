@@ -1,13 +1,18 @@
 const axios = require("axios");
 
-const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
+// Read token lazily so it's always picked up after dotenv loads
 const PD_BASE  = "https://api.pipedrive.com/v1";
+function getToken() {
+  const t = process.env.PIPEDRIVE_API_TOKEN;
+  if (!t) throw new Error("PIPEDRIVE_API_TOKEN is not set in .env");
+  return t;
+}
 
 let cachedStageId = null;
 
 /* ─── Helpers ────────────────────────────────────────────────── */
 function pd(path) {
-  return `${PD_BASE}${path}?api_token=${PD_TOKEN}`;
+  return `${PD_BASE}${path}?api_token=${getToken()}`;
 }
 
 async function get(path) {
@@ -155,7 +160,9 @@ async function createDeal(personId, session, phone) {
 
 /* ─── Main export ────────────────────────────────────────────── */
 async function saveLead(session, phone) {
-  if (!PD_TOKEN) throw new Error("PIPEDRIVE_API_TOKEN is not set in .env");
+  const token = process.env.PIPEDRIVE_API_TOKEN;
+  console.log(`🔑 PIPEDRIVE_API_TOKEN present: ${!!token}, length: ${token?.length}, first 6: ${token?.slice(0,6)}`);
+  getToken(); // validates token is present before doing any work
   console.log(`🚀 Saving Pipedrive lead for ${phone}...`);
   const personId = await findOrCreateContact(session.clientName, phone);
   const dealId   = await createDeal(personId, session, phone);
