@@ -247,6 +247,13 @@ Client name: ${session.clientName || "unknown"}
 - awaiting_insurance → waiting for insurance photo (DO NOT ask for it — already asked)
 - docs_complete   → all done, handoff to team
 
+## CRITICAL RULES FOR app_sent STAGE
+When stage is app_sent:
+- NEVER say you are submitting, processing, or have submitted the application — you cannot do that
+- NEVER say "your application is submitted" or "we're all set" — the client submits it themselves
+- ONLY ask if they've completed the application yet
+- If they say anything ambiguous, ask them to confirm they've hit submit on the form
+
 ## WHEN TO SET app_sent STAGE
 When you send the application link (${APP_LINK}), include this tag on its own line at the end:
 [APP_SENT]
@@ -524,7 +531,12 @@ router.post("/", async (req, res) => {
 
     /* ─── POST-APPLICATION: CONFIRMATION CHECK ───────── */
     if (session.stage === "app_sent") {
-      const confirmed = /^(done|submitted|filled|complete|finished|sent|yes|yeah|yep|yup|did it|i did|i submitted|just submitted|just filled)$/i.test(msg.trim());
+      // Strip punctuation and check loosely — catches "done*", "done!", "doneee", typos
+      const cleaned = msg.trim().toLowerCase().replace(/[^a-z\s]/g, "").trim();
+      const confirmed = /^(done|submitted|filled|complete|finished|sent|yes|yeah|yep|yup|did it|i did|i submitted|just submitted|just filled|i filled it|all done|just done|its done|it's done)$/.test(cleaned)
+        || /^done/.test(cleaned)   // starts with "done"
+        || /^yes/.test(cleaned)    // starts with "yes"
+        || /submitted/.test(cleaned);
 
       if (confirmed) {
         session.stage = "awaiting_license";
