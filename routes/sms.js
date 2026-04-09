@@ -8,7 +8,6 @@ const { getSession } = require("../utils/memory");
 const OpenAI = require("openai");
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ===== BASIC FILTER (LIGHT ONLY) =====
 function basicFilter(deals, msg) {
   msg = msg.toLowerCase();
 
@@ -16,55 +15,63 @@ function basicFilter(deals, msg) {
     deals = deals.filter(d => d.make.toLowerCase().includes("bmw"));
   }
 
-  if (msg.includes("mercedes")) {
-    deals = deals.filter(d => d.make.toLowerCase().includes("mercedes"));
-  }
-
-  if (msg.includes("audi")) {
-    deals = deals.filter(d => d.make.toLowerCase().includes("audi"));
-  }
-
-  if (msg.includes("lexus")) {
-    deals = deals.filter(d => d.make.toLowerCase().includes("lexus"));
-  }
-
   if (msg.includes("suv")) {
     deals = deals.filter(d =>
-      /x1|x3|x5|x7|gla|glb|glc|gle|rx|nx|qx|cx|rav4|crv|tiguan|highlander/i.test(
+      /x1|x3|x5|x7|gla|glb|glc|gle|rx|nx|qx|cx|rav4|crv|tiguan/i.test(
         `${d.make} ${d.model}`
       )
     );
   }
 
-  if (msg.includes("ev") || msg.includes("electric")) {
-    deals = deals.filter(d =>
-      /ev|electric|ioniq|tesla|bolt|leaf/i.test(
-        `${d.make} ${d.model}`
-      )
-    );
-  }
-
-  const nums = msg.match(/\d{3,4}/);
-  if (nums) {
-    const budget = parseInt(nums[0]);
-    deals = deals.filter(d => d.monthly <= budget);
-  }
-
-  return deals.slice(0, 12); // give AI options, not overload
+  return deals.slice(0, 12);
 }
 
-// ===== ROUTE =====
+function attachIds(deals) {
+  return deals.map((d, i) => ({
+    id: i + 1,
+    make: d.make,
+    model: d.model,
+    monthly: d.monthly,
+    due: d.due,
+    term: d.term,
+    miles: d.miles
+  }));
+}
+
 router.post("/", async (req, res) => {
   res.sendStatus(200);
 
   const from = req.body.number || req.body.from;
-  const msg = (req.body.content || req.body.text || "").trim();
+  const msg = (req.body.content || "").toLowerCase().trim();
 
   const session = getSession(from);
 
   try {
     const allDeals = await getDeals();
-    const filteredDeals = basicFilter(allDeals, msg);
+    let filtered = basicFilter(allDeals, msg);
+
+    const dealsWithIds = attachIds(filtered);
+
+    // ===== HANDLE "I like 8" =====
+    const numMatch = msg.match(/\b\d+\b/);
+    if (numMatch) {
+      const selected = dealsWithIds.find(d => d.id === parseInt(numMatch[0]));
+      if (selected) {
+        session.activeDeal = selected;
+
+        await sendHumanMessage(
+          from,
+          `${selected.make} ${selected.model}
+
+$${selected.monthly}/mo
+${selected.term} mo / ${selected.miles}
+$${selected.due} due
+
+want me to adjust the numbers or lock it in?`
+        );
+        return;
+      }
+    }
 
     const ai = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -72,85 +79,34 @@ router.post("/", async (req, res) => {
         {
           role: "system",
           content: `
-You are a high-end auto broker texting clients.
+You are a high-end auto broker texting.
 
-You are NOT a chatbot. You are a real closer.
+STRICT RULES:
 
-------------------------
-CORE RULES
-------------------------
-
-1. NEVER reset conversation
-- Do NOT ask "what are you looking for" again
-- Continue naturally
-
-2. TRACK ACTIVE DEAL
-- If user selects a car, that is the deal
-- All follow-ups refer to it unless changed
-
-3. NEVER INVENT DATA
-- Only use provided deals
-- If not found → say you'll source it
-
-4. ANSWER DIRECTLY
-- If asked price with 0 down → calculate
-- DO NOT say "I’ll check"
-
-5. STAY RELEVANT
-- SUV → only SUVs
-- EV → only EVs
-- If none → say you'll source
-
-6. DO NOT SPAM LISTS
-- Recommend 1–2 options max
-- If asked for all → summarize cleanly
-
-7. CLOSING
-- If user says "lock it in":
-→ "perfect — fill this out and I’ll lock it in"
-→ include link: https://onyxautocollection.com/1745-2/
-
-8. TONE
-- Short
-- Confident
-- Smooth
-- No corporate talk
-- No bullet lists
+- No bullet points
 - No numbered lists
+- No bold text
+- Text like a human
 
-------------------------
-NEGOTIATION LOGIC
-------------------------
+- NEVER say "I'll check" or "I'll get back to you"
+- If deal exists → answer directly
 
-Use:
+- If user selects a number → that is the deal
+- NEVER switch cars incorrectly
 
-13 mo → $77 per $1000  
-18 mo → $56  
-24 mo → $42  
-36 mo → $28  
-39 mo → $26  
-48 mo → $21  
+- ONLY reference cars from this list
+- NEVER say a car doesn't exist if it's listed
 
-Adjust monthly based on down payment difference.
+- Recommend 1-2 options max unless user asks for all
 
-------------------------
-ACTIVE DEAL
-------------------------
+- Keep it short and clean
+
+DEALS:
+${JSON.stringify(dealsWithIds, null, 2)}
+
+ACTIVE DEAL:
 ${JSON.stringify(session.activeDeal || null)}
-
-------------------------
-AVAILABLE DEALS
-------------------------
-${JSON.stringify(filteredDeals, null, 2)}
-
-------------------------
-GOAL
-------------------------
-
-Guide the deal.
-Be sharp.
-Close when ready.
-          `
+`
         },
         {
           role: "user",
@@ -161,19 +117,10 @@ Close when ready.
 
     const reply = ai.choices[0].message.content;
 
-    // ===== SAVE ACTIVE DEAL (simple detection) =====
-    const match = filteredDeals.find(d =>
-      reply.toLowerCase().includes(d.model.toLowerCase())
-    );
-
-    if (match) {
-      session.activeDeal = match;
-    }
-
     await sendHumanMessage(from, reply);
 
   } catch (err) {
-    console.log("SMS ERROR:", err);
+    console.log(err);
   }
 });
 
