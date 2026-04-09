@@ -430,7 +430,7 @@ router.post("/", async (req, res) => {
       session.greeted = true;
       await sendHumanMessage(
         from,
-        "Hey! Welcome to Onyx Auto Collection \U0001F44B\n\nWe speak English, Armenian (\u0540\u0561\u0575\u0565\u0580\u0587\u0576), Russian (\u0420\u0443\u0441\u0441\u043a\u0438\u0439), Farsi (\u0641\u0627\u0631\u0633\u06CC), and Arabic (\u0627\u0644\u0639\u0631\u0628\u064a\u0629) \u2014 just text in your language and we'll match it.\n\nWhat are you looking for?"
+        "Hey! Welcome to Onyx Auto Collection 👋\n\nWe speak English, Armenian (Հայերեն), Russian (Русский), Farsi (فارسی), and Arabic (العربية) — just text in your language and we'll match it.\n\nWhat are you looking for?"
       );
       // Store their first message in history then return —
       // the greeting IS the response for this turn
