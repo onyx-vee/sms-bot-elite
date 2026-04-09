@@ -3,7 +3,7 @@ const router = express.Router();
 
 const { sendHumanMessage, forwardImage } = require("../services/messaging");
 const { getDeals } = require("../services/deals");
-const { saveLead } = require("../services/sheets");
+const { saveLead } = require("../services/pipedrive");
 const { getSession } = require("../utils/memory");
 
 const OpenAI = require("openai");
