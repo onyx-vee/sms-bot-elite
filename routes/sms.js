@@ -240,11 +240,21 @@ function basicFilter(deals, msg) {
   }
 
   // ── Direct model name match (most important) ───────────────────
-  // Check every deal to see if its model name appears in the message
-  // This catches "QX60", "Tahoe", "Wrangler", etc. without needing brand context
-  const modelMatched = filtered.filter(d =>
-    d.model && msg.includes(d.model.toLowerCase())
-  );
+  // Check every deal to see if its model name appears in the message.
+  // Also tokenizes model names so "530i" matches "BMW 530i Base" and vice versa.
+  const msgTokens = msg.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+
+  const modelMatched = filtered.filter(d => {
+    if (!d.model) return false;
+    const modelLower = d.model.toLowerCase();
+    // Full model string in message
+    if (msg.includes(modelLower)) return true;
+    // Every token of the model appears somewhere in the message
+    const modelTokens = modelLower.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+    // Match if any single meaningful token (3+ chars) from the model appears in msg tokens
+    return modelTokens.some(t => t.length >= 3 && msgTokens.includes(t));
+  });
+
   if (modelMatched.length > 0) {
     return modelMatched; // hard match — return immediately, skip other filters
   }
@@ -448,7 +458,7 @@ router.post("/", async (req, res) => {
 
     /* ─── POST-APPLICATION: CONFIRMATION CHECK ───────── */
     if (session.stage === "app_sent") {
-      const confirmed = /done|submitted|filled|complete|finished|sent|yes|yeah|yep|yup|did it/i.test(msg);
+      const confirmed = /^(done|submitted|filled|complete|finished|sent|yes|yeah|yep|yup|did it|i did|i submitted|just submitted|just filled)$/i.test(msg.trim());
 
       if (confirmed) {
         session.stage = "awaiting_license";
@@ -459,20 +469,10 @@ router.post("/", async (req, res) => {
         return;
       }
 
-      // If they're negotiating or asking questions, fall through to AI — don't block them
-      const isNegotiating = /adjust|lower|payment|down|more|less|instead|\$\d|monthly|due|term/i.test(msg);
-      const isQuestion    = /\?|how|what|where|when|which|help/i.test(msg);
-      if (isNegotiating || isQuestion) {
-        // Drop back to closing stage so AI can handle it properly
-        session.stage = "closing";
-        // fall through to AI below
-      } else {
-        await sendHumanMessage(
-          from,
-          "Take your time! Just reply back once you've hit submit and we'll get the next steps going."
-        );
-        return;
-      }
+      // Anything else — changed mind, questions, negotiating, venting — goes to AI
+      // Drop back to closing so the AI has full context and can respond naturally
+      session.stage = "closing";
+      // fall through to AI below
     }
 
     /* ─── EXTRACT NAME if mentioned ─────────────────── */
@@ -665,6 +665,18 @@ router.post("/", async (req, res) => {
     if (shouldSetAppSent && session.stage !== "app_sent") {
       session.stage = "app_sent";
       console.log(`📋 App link sent to ${from} — awaiting confirmation`);
+
+      // Auto-save lead to Pipedrive the moment app link goes out
+      // This is the most reliable trigger — don't wait for AI to emit [SAVE_LEAD]
+      if (!session.leadSaved) {
+        try {
+          await saveLead(session, from);
+          session.leadSaved = true;
+          console.log(`✅ Lead auto-saved to Pipedrive for ${from}`);
+        } catch (e) {
+          console.error(`❌ Pipedrive auto-save failed for ${from}:`, e.message);
+        }
+      }
     }
 
     /* ─── SEND REPLY & STORE IN HISTORY ─────────────── */
