@@ -56,15 +56,48 @@ function basicFilter(deals, msg) {
 }
 
 /* =========================
-   DETECT DEAL FROM MESSAGE
+   SMART SELECTION ENGINE
 ========================= */
-function detectDealFromMessage(msg, deals) {
-  msg = msg.toLowerCase();
+function resolveSelection(msg, deals, activeDeal) {
+  if (!deals || !deals.length) return null;
 
-  return deals.find(d => {
-    const full = `${d.make} ${d.model}`.toLowerCase();
-    return msg.includes(d.model.toLowerCase()) || msg.includes(full);
-  });
+  const text = msg.toLowerCase();
+
+  // number
+  const numMatch = text.match(/\b\d+\b/);
+  if (numMatch) {
+    const index = parseInt(numMatch[0]) - 1;
+    return deals[index] || null;
+  }
+
+  // position
+  if (text.includes("first")) return deals[0];
+  if (text.includes("second")) return deals[1];
+  if (text.includes("third")) return deals[2];
+  if (text.includes("last")) return deals[deals.length - 1];
+
+  // cheapest / most expensive
+  if (text.includes("cheapest") || text.includes("lowest")) {
+    return [...deals].sort((a, b) => a.monthly - b.monthly)[0];
+  }
+
+  if (text.includes("expensive") || text.includes("highest")) {
+    return [...deals].sort((a, b) => b.monthly - a.monthly)[0];
+  }
+
+  // "that one"
+  if (text.includes("that") || text.includes("this one")) {
+    return activeDeal || deals[0];
+  }
+
+  // model match
+  const match = deals.find(d =>
+    text.includes(d.model.toLowerCase())
+  );
+
+  if (match) return match;
+
+  return null;
 }
 
 /* =========================
@@ -86,26 +119,46 @@ router.post("/", async (req, res) => {
     ========================= */
     if (msg.toLowerCase().includes("start over")) {
       session.activeDeal = null;
+      session.lastShownDeals = null;
 
       await sendHumanMessage(from, "starting fresh — what are you looking for?");
       return;
     }
 
     /* =========================
-       UPDATE ACTIVE DEAL
+       FILTER + STORE LIST
     ========================= */
-    const detected = detectDealFromMessage(msg, allDeals);
-    if (detected) {
-      session.activeDeal = detected;
+    const filteredDeals = basicFilter(allDeals, msg);
+    session.lastShownDeals = filteredDeals.slice(0, 12);
+
+    /* =========================
+       SMART SELECTION (CRITICAL)
+    ========================= */
+    const selected = resolveSelection(
+      msg,
+      session.lastShownDeals,
+      session.activeDeal
+    );
+
+    if (selected) {
+      session.activeDeal = selected;
+
+      await sendHumanMessage(
+        from,
+`${selected.make} ${selected.model}
+
+$${selected.monthly}/mo
+${selected.term} mo / ${selected.miles}
+$${selected.due} due
+
+want me to adjust the numbers or lock it in?`
+      );
+
+      return;
     }
 
     /* =========================
-       FILTERED (for suggestions)
-    ========================= */
-    const filteredDeals = basicFilter(allDeals, msg);
-
-    /* =========================
-       ALWAYS PASS FULL DATASET
+       AI RESPONSE
     ========================= */
     const ai = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -115,51 +168,30 @@ router.post("/", async (req, res) => {
           content: `
 You are a high-end auto broker texting clients.
 
-------------------------
-CRITICAL RULES
-------------------------
+RULES:
 
-- You ALWAYS have access to ALL deals
-- NEVER say:
-  "I can't send"
-  "I don't have"
-  "I'll check"
+- Never say "I can't" or "I'll check"
+- You ALWAYS have access to all deals
+- If a car exists, use it
 
-- If a car exists in ALL DEALS → you HAVE it
-
-- FILTERED DEALS = suggestions
-- ALL DEALS = full inventory
-
-------------------------
-CONVERSATION
-------------------------
-
-- Never reset conversation unless user says start over
 - If active deal exists → prioritize it
-- If user asks about a specific car → answer using ALL DEALS
+- Do NOT switch cars randomly
 
-------------------------
-ACTIVE DEAL
-------------------------
+- Recommend 1-2 options max
+- Keep responses clean and short
+
+- Do NOT reset conversation
+
+NEGOTIATION:
+
+36 mo → $28 per $1000  
+39 mo → $26 per $1000  
+
+ACTIVE DEAL:
 ${JSON.stringify(session.activeDeal || null)}
 
-------------------------
-FILTERED DEALS (suggestions)
-------------------------
-${JSON.stringify(filteredDeals.slice(0, 10), null, 2)}
-
-------------------------
-ALL DEALS (full inventory)
-------------------------
-${JSON.stringify(allDeals.slice(0, 50), null, 2)}
-
-------------------------
-GOAL
-------------------------
-
-Give accurate answers.
-Stay consistent.
-Never contradict available data.
+DEALS:
+${JSON.stringify(filteredDeals.slice(0, 12), null, 2)}
 `
         },
         {
