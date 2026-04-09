@@ -8,7 +8,9 @@ const { getSession } = require("../utils/memory");
 const OpenAI = require("openai");
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ===== BASIC FILTER (LIGHT ONLY) =====
+/* =========================
+   BASIC FILTER
+========================= */
 function basicFilter(deals, msg) {
   msg = msg.toLowerCase();
 
@@ -50,10 +52,27 @@ function basicFilter(deals, msg) {
     deals = deals.filter(d => d.monthly <= budget);
   }
 
-  return deals.slice(0, 12); // give AI options, not overload
+  return deals.slice(0, 12);
 }
 
-// ===== ROUTE =====
+/* =========================
+   FIND DEAL FROM USER TEXT
+========================= */
+function detectDealFromMessage(msg, deals) {
+  msg = msg.toLowerCase();
+
+  return deals.find(d => {
+    const full = `${d.make} ${d.model}`.toLowerCase();
+    return (
+      msg.includes(d.model.toLowerCase()) ||
+      msg.includes(full)
+    );
+  });
+}
+
+/* =========================
+   ROUTE
+========================= */
 router.post("/", async (req, res) => {
   res.sendStatus(200);
 
@@ -66,6 +85,28 @@ router.post("/", async (req, res) => {
     const allDeals = await getDeals();
     const filteredDeals = basicFilter(allDeals, msg);
 
+    /* =========================
+       UPDATE ACTIVE DEAL (FROM USER)
+    ========================= */
+    const detected = detectDealFromMessage(msg, allDeals);
+    if (detected) {
+      session.activeDeal = detected;
+    }
+
+    /* =========================
+       FALLBACK IF NO DEALS
+    ========================= */
+    if (!filteredDeals.length) {
+      await sendHumanMessage(
+        from,
+        "nothing clean in that exact setup — i can source something better for you. what direction are you thinking?"
+      );
+      return;
+    }
+
+    /* =========================
+       AI
+    ========================= */
     const ai = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -81,48 +122,39 @@ CORE RULES
 ------------------------
 
 1. NEVER reset conversation
-- Do NOT ask "what are you looking for" again
-- Continue naturally
 
-2. TRACK ACTIVE DEAL
-- If user selects a car, that is the deal
-- All follow-ups refer to it unless changed
+2. ACTIVE DEAL IS PRIORITY
+- If active deal exists → ALWAYS refer to it
+- If user asks about pricing, down payment, etc → use that deal
 
 3. NEVER INVENT DATA
 - Only use provided deals
 - If not found → say you'll source it
 
 4. ANSWER DIRECTLY
-- If asked price with 0 down → calculate
-- DO NOT say "I’ll check"
+- If asked price with 0 down → calculate immediately
 
-5. STAY RELEVANT
-- SUV → only SUVs
-- EV → only EVs
-- If none → say you'll source
+5. DO NOT IGNORE CONTEXT
+- If user says "that one", "the x7", etc → refer to active deal
 
 6. DO NOT SPAM LISTS
-- Recommend 1–2 options max
-- If asked for all → summarize cleanly
+- Recommend 1–2 deals max
+- If asked for all → summarize, not dump everything
 
 7. CLOSING
 - If user says "lock it in":
 → "perfect — fill this out and I’ll lock it in"
-→ include link: https://onyxautocollection.com/1745-2/
+→ https://onyxautocollection.com/1745-2/
 
 8. TONE
 - Short
 - Confident
-- Smooth
+- Natural
 - No corporate talk
-- No bullet lists
-- No numbered lists
 
 ------------------------
 NEGOTIATION LOGIC
 ------------------------
-
-Use:
 
 13 mo → $77 per $1000  
 18 mo → $56  
@@ -130,8 +162,6 @@ Use:
 36 mo → $28  
 39 mo → $26  
 48 mo → $21  
-
-Adjust monthly based on down payment difference.
 
 ------------------------
 ACTIVE DEAL
@@ -147,10 +177,10 @@ ${JSON.stringify(filteredDeals, null, 2)}
 GOAL
 ------------------------
 
-Guide the deal.
-Be sharp.
+Guide the deal forward naturally.
+Never lose context.
 Close when ready.
-          `
+`
         },
         {
           role: "user",
@@ -161,7 +191,9 @@ Close when ready.
 
     const reply = ai.choices[0].message.content;
 
-    // ===== SAVE ACTIVE DEAL (simple detection) =====
+    /* =========================
+       SAVE DEAL (AI RESPONSE FALLBACK)
+    ========================= */
     const match = filteredDeals.find(d =>
       reply.toLowerCase().includes(d.model.toLowerCase())
     );
