@@ -176,7 +176,9 @@ ${language === "armenian"
 4. Push toward next step: appointment, application, or deposit
 
 ## CONVERSATION RULES
-- Only recommend 1–2 cars at a time — never dump the whole list
+- If client gives a price range or asks to see options, show ALL matching cars (up to 5) with a numbered list
+- If client asks about a specific car or says 'that one', show just that one
+- Otherwise limit to 1–2 recommendations
 - Once a car is selected (active deal), stay focused on it unless they ask to switch
 - If they mention a budget, stick to it — don't show anything over their number
 - If they say "yes," "let's do it," or similar → send them the app link: ${APP_LINK}
@@ -218,7 +220,7 @@ If a target monthly is unrealistically low (requires more than $10k down), say s
 ## COLLECTING CLIENT INFO
 As the conversation progresses, extract and remember:
 - Their name → stored automatically when detected
-- Their budget (monthly payment they mention) → tag: [BUDGET:###]
+- Their budget (monthly payment they mention) → tag: [BUDGET:###] for single value or [BUDGET:###-###] for a range
 - Their zip code → tag: [ZIP:#####]
 
 When you learn their budget or zip, include the tag at the end of your reply.
@@ -323,10 +325,19 @@ function basicFilter(deals, msg) {
   }
 
   // ── Budget filter ──────────────────────────────────────────────
-  const budgetMatch = msg.match(/\$?(\d{3,4})\s*(\/mo|a month|per month|monthly)?/);
-  if (budgetMatch) {
-    const budget = parseInt(budgetMatch[1]);
-    filtered = filtered.filter(d => d.monthly <= budget);
+  // Range: "between 500 and 700" / "500-700" / "500 to 700"
+  const rangeMatch = msg.match(/\$?(\d{3,4})\s*(?:to|and|-|–)\s*\$?(\d{3,4})/);
+  if (rangeMatch) {
+    const lo = parseInt(rangeMatch[1]);
+    const hi = parseInt(rangeMatch[2]);
+    filtered = filtered.filter(d => d.monthly >= lo && d.monthly <= hi);
+  } else {
+    // Single budget: "under 700" / "700/mo" / "700 a month"
+    const budgetMatch = msg.match(/\$?(\d{3,4})\s*(\/mo|a month|per month|monthly)?/);
+    if (budgetMatch) {
+      const budget = parseInt(budgetMatch[1]);
+      filtered = filtered.filter(d => d.monthly <= budget);
+    }
   }
 
   // if filters eliminated everything, return full unfiltered list
@@ -659,10 +670,12 @@ router.post("/", async (req, res) => {
     const shouldSetAppSent  = reply.includes("[APP_SENT]");
     const shouldSourceVehicle = reply.includes("[SOURCE_REQUEST]");
 
-    // Extract budget tag e.g. [BUDGET:650]
-    const budgetMatch = reply.match(/\[BUDGET:(\d+)\]/);
+    // Extract budget tag — handles single [BUDGET:650] or range [BUDGET:500-700]
+    const budgetMatch = reply.match(/\[BUDGET:([\d]+-?[\d]*)\]/);
     if (budgetMatch && !session.budget) {
-      session.budget = `$${budgetMatch[1]}/mo`;
+      session.budget = budgetMatch[1].includes("-")
+        ? `$${budgetMatch[1]}/mo`
+        : `$${budgetMatch[1]}/mo`;
     }
 
     // Extract zip tag e.g. [ZIP:90210]
@@ -677,7 +690,7 @@ router.post("/", async (req, res) => {
       .replace(/\[ESCALATE\]/g, "")
       .replace(/\[APP_SENT\]/g, "")
       .replace(/\[SOURCE_REQUEST\]/g, "")
-      .replace(/\[BUDGET:\d+\]/g, "")
+      .replace(/\[BUDGET:[\d-]+\]/g, "")
       .replace(/\[ZIP:\d{5}\]/g, "")
       .trim();
 
