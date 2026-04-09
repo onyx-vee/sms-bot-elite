@@ -1,7 +1,7 @@
 const axios = require("axios");
 
 // Read token lazily so it's always picked up after dotenv loads
-const PD_BASE  = "https://onyxautocollection.pipedrive.com/api/v1";
+const PD_BASE  = "https://onyxautocollection.pipedrive.com/v1";
 function getToken() {
   const t = process.env.PIPEDRIVE_API_TOKEN;
   if (!t) throw new Error("PIPEDRIVE_API_TOKEN is not set in .env");
@@ -12,7 +12,8 @@ let cachedStageId = null;
 
 /* ─── Helpers ────────────────────────────────────────────────── */
 function pd(path) {
-  return `${PD_BASE}${path}?api_token=${getToken()}`;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${PD_BASE}${path}${sep}api_token=${getToken()}`;
 }
 
 async function get(path) {

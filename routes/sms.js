@@ -176,9 +176,9 @@ ${language === "armenian"
 4. Push toward next step: appointment, application, or deposit
 
 ## CONVERSATION RULES
-- If client gives a price range or asks to see options, show ALL matching cars (up to 5) with a numbered list
-- If client asks about a specific car or says 'that one', show just that one
-- Otherwise limit to 1–2 recommendations
+- If client asks to see ALL options, a range, or says "show me everything/what do you have" → list EVERY car in the inventory below, numbered, one per line. Do not truncate.
+- If client asks about a specific car → show just that one with full details
+- If client is browsing without a specific request → suggest 2–3 best matches
 - Once a car is selected (active deal), stay focused on it unless they ask to switch
 - If they mention a budget, stick to it — don't show anything over their number
 - If they say "yes," "let's do it," or similar → send them the app link: ${APP_LINK}
@@ -259,9 +259,9 @@ When you send the application link (${APP_LINK}), include this tag on its own li
 [APP_SENT]
 
 ## LIVE INVENTORY (filtered to their search)
-The list below is already filtered and sorted to match what the client asked for.
-Lead with the FIRST option — it's the best match. Only mention others if they ask.
-${dealList}
+Total matching: ${deals.length} vehicle${deals.length !== 1 ? "s" : ""}
+The list is already filtered and sorted. If client asked to see all options, list ALL of them below — do not summarize or truncate.
+\${dealList}
 
 Respond ONLY with your text message reply. No labels, no quotes, no extra formatting.`;
 }
