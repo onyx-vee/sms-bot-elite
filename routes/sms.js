@@ -214,6 +214,8 @@ When you send the application link (${APP_LINK}), include this tag on its own li
 [APP_SENT]
 
 ## LIVE INVENTORY (filtered to their search)
+The list below is already filtered and sorted to match what the client asked for.
+Lead with the FIRST option — it's the best match. Only mention others if they ask.
 ${dealList}
 
 Respond ONLY with your text message reply. No labels, no quotes, no extra formatting.`;
@@ -486,7 +488,16 @@ router.post("/", async (req, res) => {
 
     /* ─── FILTER DEALS (only on search intent) ──────── */
     if (hasSearchIntent(msg) || !session.lastShownDeals) {
-      const filtered = basicFilter(allDeals, msg);
+      let filtered = basicFilter(allDeals, msg);
+
+      // Sort by price if client asked for cheapest/most expensive
+      const msgLower = msg.toLowerCase();
+      if (/cheapest|lowest|most affordable|least expensive|budget|best deal|best price/i.test(msgLower)) {
+        filtered = filtered.sort((a, b) => a.monthly - b.monthly);
+      } else if (/most expensive|highest|nicest|best|top of the line|luxury/i.test(msgLower)) {
+        filtered = filtered.sort((a, b) => b.monthly - a.monthly);
+      }
+
       session.lastShownDeals = filtered.slice(0, 12);
     }
 
