@@ -12,10 +12,77 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const { APP_LINK, OWNER_PHONE } = require("../config/constants");
 
 /* =========================
+   PAYMENT CALCULATOR
+   Adjusts monthly based on how much more/less the client puts down vs the listed due amount.
+   Formula: new_monthly = base_monthly - (extra_down / term)
+   Positive extra_down  → lower monthly
+   Negative extra_down  → higher monthly (less down)
+========================= */
+function calculatePayment(deal, targetDown) {
+  if (!deal || !deal.monthly || !deal.term) return null;
+
+  const baseDue     = parseFloat(String(deal.due).replace(/[^0-9.]/g, "")) || 0;
+  const baseMonthly = parseFloat(String(deal.monthly).replace(/[^0-9.]/g, "")) || 0;
+  const term        = parseInt(deal.term) || 36;
+
+  const extraDown   = targetDown - baseDue;           // positive = more down, negative = less down
+  const adjustment  = extraDown / term;               // per-month impact
+  const newMonthly  = Math.max(0, baseMonthly - adjustment); // can't go negative
+
+  return {
+    newMonthly:  Math.round(newMonthly),
+    newDue:      Math.round(targetDown),
+    adjustment:  Math.round(Math.abs(adjustment)),
+    direction:   adjustment >= 0 ? "decrease" : "increase"
+  };
+}
+
+/* =========================
+   DETECT PAYMENT ADJUSTMENT REQUEST
+   Returns target down payment if client is asking to adjust, otherwise null
+========================= */
+function detectPaymentAdjustment(msg, deal) {
+  if (!deal) return null;
+
+  const text = msg.toLowerCase();
+
+  // "bring it down to $348" / "can you do $400 a month" / "I want $500/mo"
+  const targetMonthlyMatch = msg.match(/\$?(\d{3,4})\s*(\/mo|\/month|a month|per month|monthly)/i);
+  if (targetMonthlyMatch) {
+    const targetMonthly = parseInt(targetMonthlyMatch[1]);
+    const baseMonthly   = parseFloat(String(deal.monthly).replace(/[^0-9.]/g, "")) || 0;
+    const baseDue       = parseFloat(String(deal.due).replace(/[^0-9.]/g, "")) || 0;
+    const term          = parseInt(deal.term) || 36;
+
+    // Work backwards: how much extra down to hit that monthly?
+    const monthlyDiff = baseMonthly - targetMonthly;  // how much we need to drop
+    const extraDown   = monthlyDiff * term;
+    const targetDown  = Math.max(0, baseDue + extraDown);
+
+    return { type: "target_monthly", targetMonthly, targetDown: Math.round(targetDown) };
+  }
+
+  // "put $5000 down" / "I can do $3000 down" / "if I put 2000 down"
+  const targetDownMatch = msg.match(/\$?(\d{1,5})\s*(down|upfront|at signing|due)/i);
+  if (targetDownMatch) {
+    const targetDown = parseInt(targetDownMatch[1]);
+    return { type: "target_down", targetDown };
+  }
+
+  // "lower the payment" / "can you come down" / "adjust the monthly"
+  const isVagueAdjust = /lower|reduce|come down|adjust|bring.*down|less.*month|cheaper/i.test(text);
+  if (isVagueAdjust) {
+    return { type: "vague" };
+  }
+
+  return null;
+}
+
+/* =========================
    SYSTEM PROMPT BUILDER
    Called fresh each request so the AI always sees current deals + session state
 ========================= */
-function buildSystemPrompt(session, deals) {
+function buildSystemPrompt(session, deals, paymentScenario = null) {
   const activeDeal = session.activeDeal
     ? `${session.activeDeal.make} ${session.activeDeal.model} @ $${session.activeDeal.monthly}/mo`
     : "None set yet";
@@ -67,8 +134,16 @@ NEVER repeatedly push alternatives when a client has clearly said what they want
 ## NEGOTIATION KNOWLEDGE
 - 36 month lease: ~$28 per $1,000 cap cost reduction
 - 39 month lease: ~$26 per $1,000 cap cost reduction
-- You can adjust due-at-signing in exchange for higher monthly — always frame it as a benefit to them
-- Money factor, residual, and incentives vary — don't promise exact numbers without checking
+- The key lever is due-at-signing: more down = lower monthly, less down = higher monthly
+- Formula: every $1,000 more down reduces monthly by ~$1,000 ÷ term (e.g. $1,000 extra over 36mo = ~$28/mo less)
+- ALWAYS use the pre-calculated numbers below when available — do not guess or approximate
+
+## CALCULATED PAYMENT SCENARIO
+${paymentScenario ? `
+Client requested: ${paymentScenario.request}
+CALCULATED RESULT → $${paymentScenario.newMonthly}/mo with $${paymentScenario.newDue} due at signing (monthly ${paymentScenario.direction}s by $${paymentScenario.adjustment}/mo)
+Quote these exact numbers confidently. If the target monthly is unrealistically low, say so and offer a middle ground with actual numbers.
+` : "No adjustment requested yet — quote inventory numbers as-is."}
 
 ## COLLECTING CLIENT INFO
 As the conversation progresses, extract and remember:
@@ -350,16 +425,20 @@ router.post("/", async (req, res) => {
         return;
       }
 
-      // They replied without confirming — hold the stage, nudge gently unless they asked a question
-      const isQuestion = /\?|how|what|where|when|which|help/i.test(msg);
-      if (!isQuestion) {
+      // If they're negotiating or asking questions, fall through to AI — don't block them
+      const isNegotiating = /adjust|lower|payment|down|more|less|instead|\$\d|monthly|due|term/i.test(msg);
+      const isQuestion    = /\?|how|what|where|when|which|help/i.test(msg);
+      if (isNegotiating || isQuestion) {
+        // Drop back to closing stage so AI can handle it properly
+        session.stage = "closing";
+        // fall through to AI below
+      } else {
         await sendHumanMessage(
           from,
           "Take your time! Just reply back once you've hit submit and we'll get the next steps going."
         );
         return;
       }
-      // Question asked — fall through so AI can answer it
     }
 
     /* ─── EXTRACT NAME if mentioned ─────────────────── */
@@ -392,13 +471,49 @@ router.post("/", async (req, res) => {
       session.messages = session.messages.slice(-20);
     }
 
+    /* ─── PAYMENT ADJUSTMENT DETECTION ─────────────── */
+    let paymentScenario = null;
+    const adjustment = detectPaymentAdjustment(msg, session.activeDeal);
+
+    if (adjustment && session.activeDeal) {
+      if (adjustment.type === "target_monthly") {
+        // Client said "bring it to $348/mo" — we calculated the required down
+        const calc = calculatePayment(session.activeDeal, adjustment.targetDown);
+        if (calc) {
+          paymentScenario = {
+            request:    `$${adjustment.targetMonthly}/mo target`,
+            ...calc
+          };
+        }
+      } else if (adjustment.type === "target_down") {
+        // Client said "I'll put $5,000 down"
+        const calc = calculatePayment(session.activeDeal, adjustment.targetDown);
+        if (calc) {
+          paymentScenario = {
+            request:    `$${adjustment.targetDown} down`,
+            ...calc
+          };
+        }
+      } else if (adjustment.type === "vague") {
+        // "lower the payment" — show what $500 extra down would do as an example
+        const baseDue = parseFloat(String(session.activeDeal.due).replace(/[^0-9.]/g, "")) || 0;
+        const calc    = calculatePayment(session.activeDeal, baseDue + 500);
+        if (calc) {
+          paymentScenario = {
+            request:    "lower monthly (example: $500 more down)",
+            ...calc
+          };
+        }
+      }
+    }
+
     /* ─── CALL GPT-4o-mini ──────────────────────────── */
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: buildSystemPrompt(session, currentDeals)
+          content: buildSystemPrompt(session, currentDeals, paymentScenario)
         },
         ...session.messages
       ],
