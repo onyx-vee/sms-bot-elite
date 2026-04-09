@@ -457,6 +457,12 @@ router.post("/", async (req, res) => {
   try {
     const allDeals = await getDeals();
 
+    /* ─── EASTER EGG ────────────────────────────────── */
+    if (/your\s+mo+ther\s+is\s+a\s+wh?ore|your\s+mom\s+is\s+a\s+wh?ore/i.test(msg)) {
+      await sendHumanMessage(from, "my mother is actually a very nice lady 🙂");
+      return;
+    }
+
     /* ─── RESET ─────────────────────────────────────── */
 
     /* ─── FIRST MESSAGE GREETING ─────────────────────── */
