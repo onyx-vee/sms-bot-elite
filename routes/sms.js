@@ -112,15 +112,20 @@ function detectPaymentAdjustment(msg, deal) {
 /* =========================
    LANGUAGE DETECTION
    Armenian Unicode block: U+0530–U+058F
-   Checks if message contains Armenian characters and updates session language
+   Russian/Cyrillic Unicode block: U+0400–U+04FF
 ========================= */
 function detectLanguage(msg, session) {
   const hasArmenian = /[԰-֏ﬓ-ﬗ]/.test(msg);
-  if (hasArmenian) {
-    session.language = "armenian";
-  } else if (!session.language) {
-    session.language = "english";
-  }
+  const hasRussian  = /[Ѐ-ӿ]/.test(msg);
+  const hasFarsi    = /[کگی۰-۹چژ]/.test(msg);
+  const hasArabic   = /[؀-ۿ]/.test(msg);
+
+  if (hasArmenian)         session.language = "armenian";
+  else if (hasRussian)     session.language = "russian";
+  else if (hasFarsi)       session.language = "farsi";
+  else if (hasArabic)      session.language = "arabic";
+  else if (!session.language) session.language = "english";
+
   return session.language;
 }
 
@@ -149,6 +154,12 @@ Your name is never mentioned — you're just "the team." You text like a real hu
 ## LANGUAGE
 ${language === "armenian"
   ? "The client is texting in Armenian. You MUST respond entirely in Armenian for every message. All deal details (prices, terms, models) stay in their original format but all your words must be in Armenian."
+  : language === "russian"
+  ? "The client is texting in Russian. You MUST respond entirely in Russian for every message. All deal details (prices, terms, models) stay in their original format but all your words must be in Russian."
+  : language === "farsi"
+  ? "The client is texting in Farsi (Persian). You MUST respond entirely in Farsi for every message. Use right-to-left Farsi script. All deal details (prices, terms, models) stay in their original format but all your words must be in Farsi."
+  : language === "arabic"
+  ? "The client is texting in Arabic. You MUST respond entirely in Arabic for every message. Use right-to-left Arabic script. All deal details (prices, terms, models) stay in their original format but all your words must be in Arabic."
   : "Respond in English."}
 
 ## YOUR PERSONALITY
@@ -188,6 +199,11 @@ NEVER repeatedly push alternatives when a client has clearly said what they want
 - The key lever is due-at-signing: more down = lower monthly, less down = higher monthly
 - Formula: every $1,000 more down reduces monthly by ~$1,000 ÷ term (e.g. $1,000 extra over 36mo = ~$28/mo less)
 - ALWAYS use the pre-calculated numbers below when available — do not guess or approximate
+
+## PRICING DISCLAIMER (REQUIRED)
+Whenever you quote a final monthly payment, you MUST include this disclaimer on its own line:
+"*Payments are plus tax, based on Tier 1 credit approval."
+This is required every time — no exceptions. Keep it at the end of the message, never mid-sentence.
 
 ## CALCULATED PAYMENT SCENARIO
 ${paymentScenario ? `
@@ -408,6 +424,20 @@ router.post("/", async (req, res) => {
     const allDeals = await getDeals();
 
     /* ─── RESET ─────────────────────────────────────── */
+
+    /* ─── FIRST MESSAGE GREETING ─────────────────────── */
+    if (!session.greeted) {
+      session.greeted = true;
+      await sendHumanMessage(
+        from,
+        "Hey! Welcome to Onyx Auto Collection \U0001F44B\n\nWe speak English, Armenian (\u0540\u0561\u0575\u0565\u0580\u0587\u0576), Russian (\u0420\u0443\u0441\u0441\u043a\u0438\u0439), Farsi (\u0641\u0627\u0631\u0633\u06CC), and Arabic (\u0627\u0644\u0639\u0631\u0628\u064a\u0629) \u2014 just text in your language and we'll match it.\n\nWhat are you looking for?"
+      );
+      // Store their first message in history then return —
+      // the greeting IS the response for this turn
+      session.messages.push({ role: "user", content: msg });
+      return;
+    }
+
     if (/start over|reset|restart|new search/i.test(msg)) {
       const phone = from;
       Object.keys(session).forEach(k => delete session[k]);
