@@ -60,8 +60,16 @@ Your name is never mentioned — you're just "the team." You text like a real hu
 - You can adjust due-at-signing in exchange for higher monthly — always frame it as a benefit to them
 - Money factor, residual, and incentives vary — don't promise exact numbers without checking
 
+## COLLECTING CLIENT INFO
+As the conversation progresses, extract and remember:
+- Their name → stored automatically when detected
+- Their budget (monthly payment they mention) → tag: [BUDGET:###]
+- Their zip code → tag: [ZIP:#####]
+
+When you learn their budget or zip, include the tag at the end of your reply.
+
 ## LEAD SAVE TRIGGER
-When you've collected name + phone (already have it) + vehicle interest, include this exact tag at the END of your response on its own line:
+Once you have name + vehicle interest (and ideally budget), include this tag at the END of your response on its own line:
 [SAVE_LEAD]
 
 ## ESCALATION TRIGGER  
@@ -366,35 +374,36 @@ router.post("/", async (req, res) => {
     let reply = aiResponse.choices[0].message.content.trim();
 
     /* ─── HANDLE SPECIAL TAGS ───────────────────────── */
-    const shouldSaveLead = reply.includes("[SAVE_LEAD]");
-    const shouldEscalate = reply.includes("[ESCALATE]");
+    const shouldSaveLead  = reply.includes("[SAVE_LEAD]");
+    const shouldEscalate  = reply.includes("[ESCALATE]");
     const shouldSetAppSent = reply.includes("[APP_SENT]");
+
+    // Extract budget tag e.g. [BUDGET:650]
+    const budgetMatch = reply.match(/\[BUDGET:(\d+)\]/);
+    if (budgetMatch && !session.budget) {
+      session.budget = `$${budgetMatch[1]}/mo`;
+    }
+
+    // Extract zip tag e.g. [ZIP:90210]
+    const zipMatch = reply.match(/\[ZIP:(\d{5})\]/);
+    if (zipMatch && !session.zip) {
+      session.zip = zipMatch[1];
+    }
 
     // Strip all tags from reply before sending
     reply = reply
       .replace(/\[SAVE_LEAD\]/g, "")
       .replace(/\[ESCALATE\]/g, "")
       .replace(/\[APP_SENT\]/g, "")
+      .replace(/\[BUDGET:\d+\]/g, "")
+      .replace(/\[ZIP:\d{5}\]/g, "")
       .trim();
 
     /* ─── SAVE LEAD TO GOOGLE SHEETS ────────────────── */
     if (shouldSaveLead && !session.leadSaved) {
       try {
-        await saveLead(
-          {
-            requestedCar: session.activeDeal
-              ? `${session.activeDeal.make} ${session.activeDeal.model}`
-              : session.lastShownDeals?.[0]
-              ? `${session.lastShownDeals[0].make} ${session.lastShownDeals[0].model}`
-              : "Unknown",
-            trim: session.trim || "",
-            color: session.color || "",
-            budget: session.budget || ""
-          },
-          from
-        );
+        await saveLead(session, from);
         session.leadSaved = true;
-        console.log(`✅ Lead saved for ${from}`);
       } catch (e) {
         console.log("⚠️ Lead save failed:", e.message);
       }
