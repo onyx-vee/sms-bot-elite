@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
-const { sendHumanMessage } = require("../services/messaging");
+const { sendHumanMessage, forwardImage } = require("../services/messaging");
 const { getDeals } = require("../services/deals");
 const { saveLead } = require("../services/sheets");
 const { getSession } = require("../utils/memory");
@@ -72,6 +72,19 @@ If the client is angry, asks for a manager, or the conversation stalls after 3+ 
 Active deal: ${activeDeal}
 Stage: ${session.stage || "discovery"}
 Client name: ${session.clientName || "unknown"}
+
+## STAGE REFERENCE
+- discovery       → learning what they want
+- presenting      → showing specific options
+- closing         → they're interested, push for app
+- app_sent        → application link was sent, waiting for confirmation (DO NOT send link again)
+- awaiting_license   → waiting for DL photo (DO NOT ask for it — already asked)
+- awaiting_insurance → waiting for insurance photo (DO NOT ask for it — already asked)
+- docs_complete   → all done, handoff to team
+
+## WHEN TO SET app_sent STAGE
+When you send the application link (${APP_LINK}), include this tag on its own line at the end:
+[APP_SENT]
 
 ## LIVE INVENTORY (filtered to their search)
 ${dealList}
@@ -218,6 +231,94 @@ router.post("/", async (req, res) => {
       return;
     }
 
+    /* ─── POST-APPLICATION: IMAGE HANDLING ──────────── */
+    // Sendblue delivers inbound images via media_url in the webhook body
+    const inboundMediaUrl = req.body.media_url || req.body.mediaUrl || null;
+
+    if (inboundMediaUrl) {
+      const needsLicense   = session.stage === "awaiting_license"  && !session.licenseReceived;
+      const needsInsurance = session.stage === "awaiting_insurance" && !session.insuranceReceived;
+
+      if (needsLicense) {
+        session.licenseReceived = true;
+        session.licenseUrl = inboundMediaUrl;
+        console.log(`📎 DL received from ${from}: ${inboundMediaUrl}`);
+
+        const dealLabel = session.activeDeal
+          ? `${session.activeDeal.make} ${session.activeDeal.model}`
+          : "unknown deal";
+
+        await forwardImage(
+          `+1${OWNER_PHONE}`,
+          inboundMediaUrl,
+          `🪪 Driver's license from ${from} (${session.clientName || "unknown"}) — ${dealLabel}`
+        );
+
+        session.stage = "awaiting_insurance";
+        await sendHumanMessage(
+          from,
+          "Got it, thank you! Last thing — go ahead and send a photo of your current auto insurance card."
+        );
+        return;
+      }
+
+      if (needsInsurance) {
+        session.insuranceReceived = true;
+        session.insuranceUrl = inboundMediaUrl;
+        console.log(`📎 Insurance received from ${from}: ${inboundMediaUrl}`);
+
+        const dealLabel = session.activeDeal
+          ? `${session.activeDeal.make} ${session.activeDeal.model}`
+          : "unknown deal";
+
+        await forwardImage(
+          `+1${OWNER_PHONE}`,
+          inboundMediaUrl,
+          `🛡️ Insurance card from ${from} (${session.clientName || "unknown"}) — ${dealLabel}`
+        );
+
+        await sendHumanMessage(
+          `+1${OWNER_PHONE}`,
+          `✅ All docs in from ${from} (${session.clientName || "unknown"}).\nDeal: ${dealLabel}\nDL: ${session.licenseUrl}\nInsurance: ${inboundMediaUrl}`
+        );
+
+        session.stage = "docs_complete";
+        await sendHumanMessage(
+          from,
+          "Perfect, that's everything we need. Our team will review your application and reach out shortly — usually within a few hours. We're excited to get you into that car!"
+        );
+        return;
+      }
+
+      // Image arrived outside of expected doc flow — log and continue
+      console.log(`📎 Unexpected image from ${from}: ${inboundMediaUrl}`);
+    }
+
+    /* ─── POST-APPLICATION: CONFIRMATION CHECK ───────── */
+    if (session.stage === "app_sent") {
+      const confirmed = /done|submitted|filled|complete|finished|sent|yes|yeah|yep|yup|did it/i.test(msg);
+
+      if (confirmed) {
+        session.stage = "awaiting_license";
+        await sendHumanMessage(
+          from,
+          "Amazing! To keep things moving, go ahead and send a photo of your driver's license."
+        );
+        return;
+      }
+
+      // They replied without confirming — hold the stage, nudge gently unless they asked a question
+      const isQuestion = /\?|how|what|where|when|which|help/i.test(msg);
+      if (!isQuestion) {
+        await sendHumanMessage(
+          from,
+          "Take your time! Just reply back once you've hit submit and we'll get the next steps going."
+        );
+        return;
+      }
+      // Question asked — fall through so AI can answer it
+    }
+
     /* ─── EXTRACT NAME if mentioned ─────────────────── */
     const detectedName = extractName(msg);
     if (detectedName && !session.clientName) {
@@ -267,9 +368,14 @@ router.post("/", async (req, res) => {
     /* ─── HANDLE SPECIAL TAGS ───────────────────────── */
     const shouldSaveLead = reply.includes("[SAVE_LEAD]");
     const shouldEscalate = reply.includes("[ESCALATE]");
+    const shouldSetAppSent = reply.includes("[APP_SENT]");
 
-    // Strip tags from reply before sending
-    reply = reply.replace(/\[SAVE_LEAD\]/g, "").replace(/\[ESCALATE\]/g, "").trim();
+    // Strip all tags from reply before sending
+    reply = reply
+      .replace(/\[SAVE_LEAD\]/g, "")
+      .replace(/\[ESCALATE\]/g, "")
+      .replace(/\[APP_SENT\]/g, "")
+      .trim();
 
     /* ─── SAVE LEAD TO GOOGLE SHEETS ────────────────── */
     if (shouldSaveLead && !session.leadSaved) {
@@ -314,6 +420,11 @@ router.post("/", async (req, res) => {
     /* ─── UPDATE STAGE BASED ON CONTENT ─────────────── */
     if (/yes|let's do it|i'm in|ready|sounds good|lock it/i.test(msg)) {
       session.stage = "closing";
+    }
+
+    if (shouldSetAppSent && session.stage !== "app_sent") {
+      session.stage = "app_sent";
+      console.log(`📋 App link sent to ${from} — awaiting confirmation`);
     }
 
     /* ─── SEND REPLY & STORE IN HISTORY ─────────────── */
