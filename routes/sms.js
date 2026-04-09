@@ -302,25 +302,41 @@ function basicFilter(deals, msg) {
     return modelTokens.some(t => t.length >= 3 && msgTokens.includes(t));
   });
 
-  if (modelMatched.length > 0) {
-    return modelMatched; // hard match — return immediately, skip other filters
+  // Only short-circuit on model match if message isn't a broader search
+  // e.g. "show me sedans between 500-700" should NOT match on token "sed" from a model name
+  const isBroaderSearch = /sedan|suv|crossover|coupe|truck|ev|electric|between|under|options|show me|all/i.test(msg);
+  if (modelMatched.length > 0 && !isBroaderSearch) {
+    return modelMatched; // specific model request — return immediately
   }
 
   // ── Body style filter ──────────────────────────────────────────
   if (msg.includes("suv") || msg.includes("crossover")) {
     filtered = filtered.filter(d =>
-      /x1|x3|x5|x7|gla|glb|glc|gle|gls|rx|nx|ux|qx60|qx50|qx80|cx|rav4|cr-v|tiguan|highlander|macan|cayenne|escalade|rdx|mdx|xc60|xc90|gv80|navigator|defender/i.test(
-        `${d.make} ${d.model}`
-      )
+      d.type ? d.type.toLowerCase() === "suv" : /suv|crossover/i.test(`${d.make} ${d.model}`)
     );
   }
 
   if (msg.includes("sedan")) {
     filtered = filtered.filter(d =>
-      /3 series|5 series|c-class|e-class|a4|a6|es|is|camry|accord|panamera|ct5|g70|g80|tlx/i.test(
-        `${d.make} ${d.model}`
-      )
+      d.type ? d.type.toLowerCase() === "sedan" : !/suv|truck|van|crossover|convertible|minivan/i.test(`${d.make} ${d.model}`)
     );
+  }
+
+
+  if (/\bcoupe\b/i.test(msg)) {
+    filtered = filtered.filter(d => d.type ? d.type.toLowerCase() === "coupe" : /coupe/i.test(`${d.make} ${d.model}`));
+  }
+
+  if (/\btruck\b|\bpickup\b/i.test(msg)) {
+    filtered = filtered.filter(d => d.type ? d.type.toLowerCase() === "truck" : /truck|pickup|1500|frontier|tacoma|tundra/i.test(`${d.make} ${d.model}`));
+  }
+
+  if (/\bconvertible\b/i.test(msg)) {
+    filtered = filtered.filter(d => d.type ? d.type.toLowerCase() === "convertible" : /convertible/i.test(`${d.make} ${d.model}`));
+  }
+
+  if (/\bminivan\b|\bvan\b/i.test(msg)) {
+    filtered = filtered.filter(d => d.type ? d.type.toLowerCase() === "minivan" : /sienna|carnival|pacifica|odyssey|minivan/i.test(`${d.make} ${d.model}`));
   }
 
   if (msg.includes("ev") || msg.includes("electric")) {
