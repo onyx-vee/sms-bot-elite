@@ -361,7 +361,7 @@ function basicFilter(deals, msg) {
     filtered = filtered.filter(d => d.monthly >= lo && d.monthly <= hi);
   } else {
     // Single budget: "under 700" / "700/mo" / "700 a month"
-    const budgetMatch = msg.match(/\$?(\d{3,4})\s*(\/mo|a month|per month|monthly)?/);
+    const budgetMatch = msg.match(/\$?(\d{3,4})\s*(\/mo|a month|per month|monthly)/);
     if (budgetMatch) {
       const budget = parseInt(budgetMatch[1]);
       filtered = filtered.filter(d => d.monthly <= budget);
@@ -434,8 +434,14 @@ function hasSearchIntent(msg) {
 ========================= */
 function extractName(msg) {
   // "I'm [Name]" or "my name is [Name]" or "this is [Name]"
-  const m = msg.match(/(?:i'm|i am|my name is|this is|it's|its)\s+([A-Z][a-z]+)/i);
-  return m ? m[1] : null;
+  const explicit = msg.match(/(?:i\'m|i am|my name is|this is|it\'s|its)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i);
+  if (explicit) return explicit[1];
+
+  // Bare first+last name reply e.g. "John Smith" — two capitalized words, short message
+  const bare = msg.trim().match(/^([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,15})$/);
+  if (bare && msg.length < 40 && !msg.includes("?")) return `${bare[1]} ${bare[2]}`;
+
+  return null;
 }
 
 /* =========================
@@ -463,7 +469,7 @@ router.post("/", async (req, res) => {
     const allDeals = await getDeals();
 
     /* ─── EASTER EGG ────────────────────────────────── */
-    if (/your\s+mo+ther'?s?(\s+is)?\s+a\s+wh?ore|your\s+mom'?s?(\s+is)?\s+a\s+wh?ore/i.test(msg)) {
+    if (/(your\s+)?(mo+ther|mom).{0,20}wh?ore/i.test(msg)) {
       await sendHumanMessage(from, "my mother is actually a very nice lady 🙂");
       return;
     }
@@ -733,11 +739,16 @@ router.post("/", async (req, res) => {
       .replace(/\[ZIP:\d{5}\]/g, "")
       .trim();
 
-    /* ─── SAVE LEAD TO GOOGLE SHEETS ────────────────── */
-    if (shouldSaveLead && !session.leadSaved) {
+    /* ─── SAVE LEAD TO PIPEDRIVE ────────────────────── */
+    // Save if GPT emitted [SAVE_LEAD], OR as a fallback after 5 exchanges
+    const exchangeCount = Math.floor(session.messages.length / 2);
+    const autoSave = exchangeCount >= 5 && session.activeDeal && !session.leadSaved;
+
+    if ((shouldSaveLead || autoSave) && !session.leadSaved) {
       try {
         await saveLead(session, from);
         session.leadSaved = true;
+        console.log(`✅ Lead saved to Pipedrive for ${from} (trigger: ${shouldSaveLead ? "[SAVE_LEAD] tag" : "auto after 5 exchanges"})`);
       } catch (e) {
         console.log("⚠️ Lead save failed:", e.message);
       }
