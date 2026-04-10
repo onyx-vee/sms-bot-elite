@@ -266,7 +266,7 @@ When you send the application link (${APP_LINK}), include this tag on its own li
 Total matching: ${deals.length} vehicle${deals.length !== 1 ? "s" : ""}
 The list is already filtered and sorted. If client asked to see all options, list ALL of them below — do not summarize or truncate.
 CRITICAL: Only use data from this list. NEVER invent or guess years, colors, mileage, prices, or any other details not shown here. If a field is blank, do not make one up.
-\${dealList}
+${dealList}
 
 Respond ONLY with your text message reply. No labels, no quotes, no extra formatting.`;
 }
