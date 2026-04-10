@@ -614,7 +614,11 @@ router.post("/", async (req, res) => {
       session.lastShownDeals = filtered.slice(0, 12);
     }
 
-    const currentDeals = session.lastShownDeals || allDeals.slice(0, 12);
+    // Always filter on first message too — don't fall back to raw unfiltered slice
+    if (!session.lastShownDeals) {
+      session.lastShownDeals = basicFilter(allDeals, msg).slice(0, 12);
+    }
+    const currentDeals = session.lastShownDeals;
 
     /* ─── SMART SELECTION ───────────────────────────── */
     const selected = resolveSelection(msg, currentDeals);
@@ -698,9 +702,12 @@ router.post("/", async (req, res) => {
     }
 
     /* ─── CALL GPT-4o-mini ──────────────────────────── */
-    const systemPrompt = buildSystemPrompt(session, currentDeals, paymentScenario, language);
+    const systemPrompt = buildSystemPrompt(session, pricedDeals.length ? pricedDeals : currentDeals, paymentScenario, language);
     console.log("🤖 Sending to GPT. Deal count:", currentDeals.length);
-    console.log("🤖 Inventory passed:\n" + currentDeals.map((d,i) => `${i+1}. ${d.make} ${d.model} $${d.monthly}/mo`).join("\n"));
+    const pricedDeals = currentDeals.filter(d => d.monthly);
+    const unpricedDeals = currentDeals.filter(d => !d.monthly);
+    console.log("🤖 Sending to GPT. Priced:", pricedDeals.length, "Unpriced (excluded):", unpricedDeals.length);
+    console.log("🤖 Inventory passed:\n" + pricedDeals.map((d,i) => `${i+1}. ${d.make} ${d.model} $${d.monthly}/mo`).join("\n"));
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
