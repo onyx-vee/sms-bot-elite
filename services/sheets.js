@@ -1,29 +1,46 @@
-const axios = require("axios");
-const { PRICING_SHEET } = require("../config/constants");
+const { google } = require("googleapis");
+const { PRICING_SHEET, LEADS_SHEET } = require("../config/constants");
 
-const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+});
 
-function getApiKey() {
-  const key = process.env.GOOGLE_API_KEY;
-  if (!key) throw new Error("GOOGLE_API_KEY is not set in .env");
-  return key;
-}
+const sheets = google.sheets({ version: "v4", auth });
 
 async function getPricingRows() {
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID || PRICING_SHEET;
-  const range = encodeURIComponent("Sheet1!A2:G");
-  const url = `${SHEETS_BASE}/${spreadsheetId}/values/${range}?key=${getApiKey()}`;
-
   try {
-    const res = await axios.get(url);
+    console.log(`📊 Fetching pricing sheet: ${PRICING_SHEET}`);
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: PRICING_SHEET,
+      range: "Sheet1!A2:G"
+    });
     const rows = res.data.values || [];
-    console.log(`📊 Loaded ${rows.length} rows from pricing sheet`);
+    console.log(`📊 Sheet loaded: ${rows.length} rows`);
+    if (rows.length > 0) console.log("📊 First row:", JSON.stringify(rows[0]));
     return rows;
   } catch (err) {
-    const detail = err.response?.data?.error?.message || err.message;
-    console.error("❌ Failed to fetch pricing sheet:", detail);
+    console.error("❌ getPricingRows failed:", err.message);
     return [];
   }
 }
 
-module.exports = { getPricingRows };
+async function saveLead(session, phone) {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: LEADS_SHEET,
+    range: "Sheet1!A:F",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        phone,
+        session.requestedCar || "",
+        session.trim || "",
+        session.color || "",
+        session.budget || "",
+        new Date().toISOString()
+      ]]
+    }
+  });
+}
+
+module.exports = { getPricingRows, saveLead };
