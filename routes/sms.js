@@ -140,10 +140,14 @@ function buildSystemPrompt(session, deals, paymentScenario = null, language = "e
 
   const dealList = deals.length
     ? deals
-        .map(
-          (d, i) =>
-            `${i + 1}. ${d.year || ""} ${d.make} ${d.model} — $${d.monthly}/mo | $${d.due} due | ${d.term}mo / ${d.miles}`
-        )
+        .map((d, i) => {
+          const monthly = d.monthly ? `$${d.monthly}/mo` : "pricing on request";
+          const due     = d.due     ? `$${d.due} due`    : "";
+          const term    = d.term    ? `${d.term}mo`      : "";
+          const miles   = d.miles   ? `${d.miles}`       : "";
+          const details = [monthly, due, term, miles].filter(Boolean).join(" | ");
+          return `${i + 1}. ${d.make} ${d.model}${details ? " — " + details : ""}`;
+        })
         .join("\n")
     : "No deals match the current filters.";
 
@@ -261,6 +265,7 @@ When you send the application link (${APP_LINK}), include this tag on its own li
 ## LIVE INVENTORY (filtered to their search)
 Total matching: ${deals.length} vehicle${deals.length !== 1 ? "s" : ""}
 The list is already filtered and sorted. If client asked to see all options, list ALL of them below — do not summarize or truncate.
+CRITICAL: Only use data from this list. NEVER invent or guess years, colors, mileage, prices, or any other details not shown here. If a field is blank, do not make one up.
 \${dealList}
 
 Respond ONLY with your text message reply. No labels, no quotes, no extra formatting.`;
@@ -458,7 +463,7 @@ router.post("/", async (req, res) => {
     const allDeals = await getDeals();
 
     /* ─── EASTER EGG ────────────────────────────────── */
-    if (/your\s+mo+ther\s+is\s+a\s+wh?ore|your\s+mom\s+is\s+a\s+wh?ore/i.test(msg)) {
+    if (/your\s+mo+ther'?s?(\s+is)?\s+a\s+wh?ore|your\s+mom'?s?(\s+is)?\s+a\s+wh?ore/i.test(msg)) {
       await sendHumanMessage(from, "my mother is actually a very nice lady 🙂");
       return;
     }
