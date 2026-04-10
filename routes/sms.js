@@ -93,10 +93,12 @@ function detectPaymentAdjustment(msg, deal) {
     return { type: "target_monthly", targetMonthly, targetDown: Math.round(targetDown) };
   }
 
-  // "put $5000 down" / "I can do $3000 down" / "if I put 2000 down"
-  const targetDownMatch = msg.match(/\$?(\d{1,5})\s*(down|upfront|at signing|due)/i);
+  // "put $5000 down" / "5k down" / "if I put 2000 down" / "5k instead of 3000"
+  const targetDownMatch = msg.match(/\$?(\d{1,5}(?:\.\d+)?)(k?)\s*(down|upfront|at signing|due|instead)/i);
   if (targetDownMatch) {
-    const targetDown = parseInt(targetDownMatch[1]);
+    const raw        = parseFloat(targetDownMatch[1]);
+    const isK        = targetDownMatch[2].toLowerCase() === "k";
+    const targetDown = Math.round(isK ? raw * 1000 : raw);
     return { type: "target_down", targetDown };
   }
 
@@ -204,7 +206,7 @@ NEVER repeatedly push alternatives when a client has clearly said what they want
 - 39 month lease: ~$26 per $1,000 cap cost reduction
 - The key lever is due-at-signing: more down = lower monthly, less down = higher monthly
 - Formula: every $1,000 more down reduces monthly by ~$1,000 ÷ term (e.g. $1,000 extra over 36mo = ~$28/mo less)
-- ALWAYS use the pre-calculated numbers below when available — do not guess or approximate
+- ALWAYS use the pre-calculated numbers below when available — do not guess, approximate, or recalculate. Quote the exact figures shown in the PAYMENT SCENARIO section.
 
 ## PRICING DISCLAIMER (REQUIRED)
 Whenever you quote a final monthly payment, you MUST include this disclaimer on its own line:
@@ -215,10 +217,12 @@ This is required every time — no exceptions. Keep it at the end of the message
 ${paymentScenario ? `
 Vehicle: ${paymentScenario.deal ? paymentScenario.deal.make + " " + paymentScenario.deal.model : "active deal"}
 Client requested: ${paymentScenario.request}
-RESULT → $${paymentScenario.newMonthly}/mo | $${paymentScenario.newDue} due at signing | ${paymentScenario.deal ? paymentScenario.deal.term : ""}mo / ${paymentScenario.deal ? paymentScenario.deal.miles : ""}
-${paymentScenario.adjustment > 0 ? `(monthly ${paymentScenario.direction}s by $${paymentScenario.adjustment}/mo vs base)` : ""}
-Quote ONLY these exact numbers. Do not use the inventory list numbers if a scenario is present.
-If a target monthly is unrealistically low (requires more than $10k down), say so and offer a realistic middle ground with actual calculated numbers.
+PRE-CALCULATED RESULT (use these EXACT numbers, do not recalculate):
+  Monthly: $${paymentScenario.newMonthly}/mo
+  Due at signing: $${paymentScenario.newDue}
+  Term: ${paymentScenario.deal ? paymentScenario.deal.term : ""}mo | Miles: ${paymentScenario.deal ? paymentScenario.deal.miles : ""}
+${paymentScenario.adjustment > 0 ? `  Change vs base: monthly ${paymentScenario.direction}s by $${paymentScenario.adjustment}/mo` : ""}
+CRITICAL: Quote ONLY the numbers above. Never do your own math. Never approximate.
 ` : "No payment scenario — quote numbers directly from inventory list."}
 
 ## COLLECTING CLIENT INFO
@@ -417,7 +421,7 @@ function resolveSelection(msg, deals) {
    Prevents re-filtering on follow-up messages like "tell me more"
 ========================= */
 function hasSearchIntent(msg) {
-  const intentKeywords = /under|budget|payment|looking for|want|need|show me|what do you have|options|available|lease|buy|finance|suv|sedan|coupe|ev|electric|\$\d{3}/i;
+  const intentKeywords = /under|budget|payment|looking for|want|need|show me|what do you have|options|available|lease|buy|finance|suv|sedan|coupe|ev|electric|\$\d{3}|full list|everything|all of|all your|see all|more options|what else|what other/i;
   if (intentKeywords.test(msg)) return true;
 
   // Also treat it as a search if the message looks like a car name:
@@ -611,7 +615,9 @@ router.post("/", async (req, res) => {
         filtered = filtered.sort((a, b) => b.monthly - a.monthly);
       }
 
-      session.lastShownDeals = filtered.slice(0, 12);
+      // If they want the full list, don't cap at 12
+      const wantsAll = /full list|everything|all of|all your|see all|show.*all|every.*car|every.*vehicle|full inventory/i.test(msg);
+      session.lastShownDeals = wantsAll ? filtered : filtered.slice(0, 12);
     }
 
     // Always filter on first message too — don't fall back to raw unfiltered slice
