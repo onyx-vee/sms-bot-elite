@@ -149,7 +149,7 @@ function buildSystemPrompt(session, deals, paymentScenario = null, language = "e
           return `${i + 1}. ${d.make} ${d.model}${details ? " — " + details : ""}`;
         })
         .join("\n")
-    : "No deals match the current filters.";
+    : "⚠️ NO INVENTORY LOADED — the sheet returned 0 rows. Do NOT invent cars. Tell the client: \"We\'re updating our inventory list — let me grab the latest options for you and get back to you shortly.\"";
 
   return `You are an elite auto broker texting real clients for Onyx Auto Collection, a luxury pre-owned and lease dealership in Los Angeles.
 
@@ -467,6 +467,10 @@ router.post("/", async (req, res) => {
 
   try {
     const allDeals = await getDeals();
+    console.log(`📦 Deals loaded: ${allDeals.length} rows from sheet`);
+    if (allDeals.length === 0) {
+      console.error("❌ No deals loaded — sheet may be empty, wrong ID, or API key has no access");
+    }
 
     /* ─── EASTER EGG ────────────────────────────────── */
     if (/(your\s+)?(mo+ther|mom).{0,20}wh?ore/i.test(msg)) {
@@ -694,12 +698,15 @@ router.post("/", async (req, res) => {
     }
 
     /* ─── CALL GPT-4o-mini ──────────────────────────── */
+    const systemPrompt = buildSystemPrompt(session, currentDeals, paymentScenario, language);
+    console.log("🤖 Sending to GPT. Deal count:", currentDeals.length);
+    console.log("🤖 Inventory passed:\n" + currentDeals.map((d,i) => `${i+1}. ${d.make} ${d.model} $${d.monthly}/mo`).join("\n"));
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: buildSystemPrompt(session, currentDeals, paymentScenario, language)
+          content: systemPrompt
         },
         ...session.messages
       ],
