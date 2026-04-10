@@ -217,7 +217,7 @@ This is required every time — no exceptions. Keep it at the end of the message
 ${paymentScenario ? `
 Vehicle: ${paymentScenario.deal ? paymentScenario.deal.make + " " + paymentScenario.deal.model : "active deal"}
 Client requested: ${paymentScenario.request}
-PRE-CALCULATED RESULT (use these EXACT numbers, do not recalculate):
+PRE-CALCULATED RESULT — YOU MUST USE THESE EXACT NUMBERS. DO NOT DO YOUR OWN MATH. DO NOT APPROXIMATE:
   Monthly: $${paymentScenario.newMonthly}/mo
   Due at signing: $${paymentScenario.newDue}
   Term: ${paymentScenario.deal ? paymentScenario.deal.term : ""}mo | Miles: ${paymentScenario.deal ? paymentScenario.deal.miles : ""}
@@ -604,7 +604,8 @@ router.post("/", async (req, res) => {
     const language = detectLanguage(msg, session);
 
     /* ─── FILTER DEALS (only on search intent) ──────── */
-    if (hasSearchIntent(msg) || !session.lastShownDeals) {
+    const wantsFullList = /full list|full inventory|see all|show.*all|every.*car|every.*vehicle|all.*options|all.*inventory|all.*available|everything you have/i.test(msg);
+    if (wantsFullList || hasSearchIntent(msg) || !session.lastShownDeals) {
       let filtered = basicFilter(allDeals, msg);
 
       // Sort by price if client asked for cheapest/most expensive
@@ -616,8 +617,7 @@ router.post("/", async (req, res) => {
       }
 
       // If they want the full list, don't cap at 12
-      const wantsAll = /full list|everything|all of|all your|see all|show.*all|every.*car|every.*vehicle|full inventory/i.test(msg);
-      session.lastShownDeals = wantsAll ? filtered : filtered.slice(0, 12);
+      session.lastShownDeals = wantsFullList ? filtered : filtered.slice(0, 12);
     }
 
     // Always filter on first message too — don't fall back to raw unfiltered slice
