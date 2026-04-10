@@ -702,12 +702,10 @@ router.post("/", async (req, res) => {
     }
 
     /* ─── CALL GPT-4o-mini ──────────────────────────── */
-    const systemPrompt = buildSystemPrompt(session, pricedDeals.length ? pricedDeals : currentDeals, paymentScenario, language);
-    console.log("🤖 Sending to GPT. Deal count:", currentDeals.length);
     const pricedDeals = currentDeals.filter(d => d.monthly);
-    const unpricedDeals = currentDeals.filter(d => !d.monthly);
-    console.log("🤖 Sending to GPT. Priced:", pricedDeals.length, "Unpriced (excluded):", unpricedDeals.length);
+    console.log("🤖 Sending to GPT. Priced:", pricedDeals.length, "of", currentDeals.length);
     console.log("🤖 Inventory passed:\n" + pricedDeals.map((d,i) => `${i+1}. ${d.make} ${d.model} $${d.monthly}/mo`).join("\n"));
+    const systemPrompt = buildSystemPrompt(session, pricedDeals.length ? pricedDeals : currentDeals, paymentScenario, language);
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
